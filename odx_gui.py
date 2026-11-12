@@ -217,6 +217,9 @@ class OdxAutoPilotGUI:
         self.badge_game = tk.Label(h_right, text="Game: [..]", font=("Segoe UI", 9, "bold"), fg="#CBD5E1", bg="#334155", padx=8, pady=2)
         self.badge_game.pack(side="left", padx=3)
 
+        self.badge_odx = tk.Label(h_right, text="Odx: [..]", font=("Segoe UI", 9, "bold"), fg="#CBD5E1", bg="#334155", padx=8, pady=2)
+        self.badge_odx.pack(side="left", padx=3)
+
         # 2. Mode Selector Bar (Host / Player / Audit)
         nav_bar = tk.Frame(self.root, bg=ModernTheme.BG_DARK)
         nav_bar.pack(fill="x", padx=10, pady=2)
@@ -678,6 +681,19 @@ class OdxAutoPilotGUI:
     # ==================================================================
     def start_system_health_checks(self):
         def _check_loop():
+            # Check Odx Engine Version & Auto-detect highest version
+            try:
+                odx_ver = be.get_odx_version_display()
+                if "0.3.5" in odx_ver:
+                    self.badge_odx.config(text=f"Odx: [{odx_ver} ✓]", bg="#065F46", fg="#A7F3D0")
+                elif "0.3.4" in odx_ver:
+                    self.badge_odx.config(text=f"Odx: [{odx_ver}]", bg="#1E3A8A", fg="#93C5FD")
+                else:
+                    self.badge_odx.config(text=f"Odx: [{odx_ver} ⚠️ Cũ]", bg="#991B1B", fg="#FECACA")
+                self.log(f"Đã kết nối Odx Engine ({odx_ver}) tại: {be.ODX_ROOT}", "SYSTEM")
+            except Exception:
+                pass
+
             # Check Admin
             adm = be.is_admin()
             try:
@@ -1716,6 +1732,19 @@ class OdxAutoPilotGUI:
         rcode = self.ent_p_room.get().strip().upper()
         if len(rcode) != 6 or not rcode.isalnum():
             messagebox.showwarning("Mã không hợp lệ", "Mã phòng phải gồm đúng 6 ký tự chữ/số do Host gửi!")
+            return
+
+        # Kiem tra tren Orchestrator xem ma phong co ton tai khong
+        r_chk = be.fetch_room_status(rcode)
+        if isinstance(r_chk, dict) and r_chk.get("error") == "NOT_FOUND":
+            messagebox.showerror(
+                "Mã phòng không tồn tại",
+                f"Mã phòng [{rcode}] KHÔNG TỒN TẠI trên hệ thống Odx!\n\n"
+                "- Có thể Host chưa bấm 'Tạo room'.\n"
+                "- Hoặc bạn gõ nhầm mã phòng.\n\n"
+                "Vui lòng kiểm tra lại mã Host gửi trước khi kết nối."
+            )
+            self.log(f"LỖI: Mã phòng [{rcode}] KHÔNG TỒN TẠI trên máy chủ Odx (Host chưa tạo hoặc sai mã).", "ERROR")
             return
 
         pid = self.ent_p_id.get().strip() or "2312"

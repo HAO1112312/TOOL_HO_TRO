@@ -33,14 +33,71 @@ ACCESS_KEY = "ygYmQNO5WfHbaUn0w1hMVg4ESu8nTEhd"
 
 TOOL_DIR = os.path.abspath(os.path.dirname(__file__))
 
-def get_odx_root():
+def get_odx_file_version(exe_path):
+    """Doc phien ban ProductVersion cua file exe tren Windows"""
+    try:
+        import win32api
+        info = win32api.GetFileVersionInfo(exe_path, "\\")
+        ms = info['FileVersionMS']
+        ls = info['FileVersionLS']
+        return (win32api.HIWORD(ms), win32api.LOWORD(ms), win32api.HIWORD(ls), win32api.LOWORD(ls))
+    except Exception:
+        pass
+    m = re.search(r"0\.(\d+)\.(\d+)", exe_path)
+    if m:
+        return (0, int(m.group(1)), int(m.group(2)), 0)
+    return (0, 0, 0, 0)
+
+def find_all_odx_roots():
+    """Tim tat ca cac thu muc Odx Capture hop le tren may va xep hang uu tien ban moi nhat"""
+    candidates = []
     here = TOOL_DIR
-    if os.path.exists(os.path.join(here, "Odx Capture.exe")) or os.path.exists(os.path.join(here, "bin")):
-        return here
     parent = os.path.abspath(os.path.join(here, ".."))
-    if os.path.exists(os.path.join(parent, "Odx Capture.exe")) or os.path.exists(os.path.join(parent, "bin")):
-        return parent
-    return here
+    for d in [here, parent]:
+        if os.path.exists(os.path.join(d, "Odx Capture.exe")) or os.path.exists(os.path.join(d, "bin", "odx-app.exe")):
+            if d not in candidates:
+                candidates.append(d)
+
+    downloads_dir = os.path.expanduser(r"~\Downloads")
+    if os.path.exists(downloads_dir):
+        for root, dirs, files in os.walk(downloads_dir):
+            rel = os.path.relpath(root, downloads_dir)
+            if rel.count(os.sep) > 3:
+                continue
+            if "Odx Capture.exe" in files or os.path.exists(os.path.join(root, "bin", "odx-app.exe")):
+                if root not in candidates:
+                    candidates.append(root)
+
+    scored = []
+    for c in candidates:
+        app_exe = os.path.join(c, "bin", "odx-app.exe")
+        cap_exe = os.path.join(c, "Odx Capture.exe")
+        target_exe = app_exe if os.path.exists(app_exe) else cap_exe
+        v_tuple = get_odx_file_version(target_exe)
+        scored.append((v_tuple, c))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored
+
+def get_odx_root():
+    scored = find_all_odx_roots()
+    if scored:
+        return scored[0][1]
+    return TOOL_DIR
+
+def get_odx_version_display():
+    root = get_odx_root()
+    app_exe = os.path.join(root, "bin", "odx-app.exe")
+    cap_exe = os.path.join(root, "Odx Capture.exe")
+    target = app_exe if os.path.exists(app_exe) else cap_exe
+    if os.path.exists(target):
+        v = get_odx_file_version(target)
+        if v != (0, 0, 0, 0):
+            return f"v{v[0]}.{v[1]}.{v[2]}"
+    m = re.search(r"0\.\d+\.\d+", root)
+    if m:
+        return f"v{m.group(0)}"
+    return "v0.3.5"
 
 ODX_ROOT = get_odx_root()
 
@@ -604,6 +661,14 @@ def player_auto_join_and_ready(room_code, player_id, player_name, on_status=None
         # 2. Clipboard
         set_clipboard(room_code)
 
+        # Kiem tra xem ma phong co thuc su ton tai tren may chu Odx khong
+        r_chk = fetch_room_status(room_code)
+        if isinstance(r_chk, dict) and r_chk.get("error") == "NOT_FOUND":
+            log_event("ROOM_NOT_FOUND_ON_SERVER", level="WARN", source="PLAYER", data={"room_code": room_code})
+            if on_status:
+                on_status(f"LỖI: Mã phòng [{room_code}] KHÔNG TỒN TẠI trên máy chủ Odx (Host chưa bấm tạo phòng hoặc bạn nhập sai mã)! Tool dừng để tránh kẹt.", "ERROR")
+            return
+
         # ============================================================
         # KIEM TRA XEM HOP THOAI "VAO ROOM" CO DANG MO SAN KHONG
         # ============================================================
@@ -909,6 +974,15 @@ Start-Sleep -Milliseconds 50
 # 4. Nhap ma phong vao CodeBox
 $roomCode = "__ROOM_CODE__"
 
+try {
+    $codeBox.SetFocus()
+    Start-Sleep -Milliseconds 50
+    [System.Windows.Forms.SendKeys]::SendWait('^a')
+    Start-Sleep -Milliseconds 40
+    [System.Windows.Forms.SendKeys]::SendWait('{BACKSPACE}')
+    Start-Sleep -Milliseconds 40
+} catch {}
+
 # A. ValuePattern
 try {
     $vp = $codeBox.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
@@ -917,10 +991,6 @@ try {
 
 # B. SendKeys de chac chan WPF fire TextChanged va sang nut OK
 try {
-    [System.Windows.Forms.SendKeys]::SendWait('^a')
-    Start-Sleep -Milliseconds 30
-    [System.Windows.Forms.SendKeys]::SendWait('{BACKSPACE}')
-    Start-Sleep -Milliseconds 30
     [System.Windows.Forms.SendKeys]::SendWait($roomCode)
 } catch {}
 Start-Sleep -Milliseconds 150
@@ -943,22 +1013,19 @@ try {
 
 # 6. Cho OkButton sang (IsEnabled = true) va click xac nhan
 $clicked = $false
-for ($w = 0; $w -lt 25; $w++) {
+for ($w = 0; $w -lt 30; $w++) {
     if ($btnOk -and $btnOk.Current.IsEnabled) {
-        # Click bang mouse vao nut
         $rOk = $btnOk.Current.BoundingRectangle
         if ($rOk.Width -gt 0 -and $rOk.Height -gt 0) {
             $cx = [int]($rOk.X + $rOk.Width / 2)
             $cy = [int]($rOk.Y + $rOk.Height / 2)
             [W32Click]::Click($cx, $cy)
             $clicked = $true
-            Write-Output "OK_MOUSE_CLICKED"
         }
         try {
             $ip = $btnOk.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
             $ip.Invoke()
             $clicked = $true
-            Write-Output "OK_INVOKED"
         } catch {}
         break
     }
@@ -969,7 +1036,6 @@ for ($w = 0; $w -lt 25; $w++) {
 if (-not $clicked) {
     try {
         [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
-        Write-Output "ENTER_SENT"
     } catch {}
 }
 
@@ -1002,7 +1068,7 @@ for ($c = 0; $c -lt 25; $c++) {
         $dlgTexts = $dlg.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cText)
         for ($dt = 0; $dt -lt $dlgTexts.Count; $dt++) {
             $dtv = $dlgTexts.Item($dt).Current.Name
-            if ($dtv -like '*no room with invite code*' -or $dtv -like '*không tìm thấy*' -or $dtv -like '*room not found*') {
+            if ($dtv -like '*no room with invite code*' -or $dtv -like '*không tìm thấy*' -or $dtv -like '*room not found*' -or $dtv -like '*Error*' -or $dtv -like '*Lỗi*') {
                 [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
                 Write-Output "ERR_ROOM_NOT_FOUND"
                 exit 1
@@ -1010,8 +1076,8 @@ for ($c = 0; $c -lt 25; $c++) {
         }
     } catch {}
 
-    # Neu van con mo thi bam tiep OkButton hoac Enter
-    if ($c -eq 4 -or $c -eq 8) {
+    # Neu van con mo sau 1s thi thu Enter them 1 lan
+    if ($c -eq 4) {
         try {
             if ($btnOk -and $btnOk.Current.IsEnabled) {
                 $rOk = $btnOk.Current.BoundingRectangle
@@ -1027,10 +1093,14 @@ for ($c = 0; $c -lt 25; $c++) {
 
 if ($dlgClosed) {
     Write-Output "DIALOG_CLOSED_SUCCESS"
+    exit 0
 } else {
+    try {
+        [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
+    } catch {}
     Write-Output "DIALOG_STILL_OPEN"
+    exit 1
 }
-exit 0
 """.replace("__ROOM_CODE__", str(room_code))
 
             res_b = run_ps_script(ps_step_b, timeout=15)
@@ -1040,11 +1110,11 @@ exit 0
                 "elapsed_ms": int((time.time() - t_start) * 1000)
             })
 
-            if "ERR_ROOM_NOT_FOUND" in out_b:
+            if "ERR_ROOM_NOT_FOUND" in out_b or "DIALOG_STILL_OPEN" in out_b or "ERR_DIALOG_STILL_OPEN" in out_b:
                 if on_status:
-                    on_status(f"LỖI: Mã phòng [{room_code}] không tồn tại trên hệ thống Odx! Vui lòng kiểm tra lại mã Host gửi.", "ERROR")
+                    on_status(f"LỖI: Mã phòng [{room_code}] không tồn tại trên hệ thống Odx (Host chưa tạo hoặc sai mã)! Tool đã đóng popup.", "ERROR")
                 return
-            elif "DIALOG_CLOSED_SUCCESS" in out_b or "OK_INVOKED" in out_b or "OK_MOUSE_CLICKED" in out_b:
+            elif "DIALOG_CLOSED_SUCCESS" in out_b:
                 if on_status:
                     on_status(f"Đã nhập mã [{room_code}] & đóng hộp thoại thành công! Đang xác thực vào phòng...", "PLAYER")
             elif "ERR_DIALOG_NOT_FOUND" in out_b:
@@ -1053,7 +1123,8 @@ exit 0
                 return
             else:
                 if on_status:
-                    on_status(f"Đã phát lệnh kết nối phòng [{room_code}]. Đang chờ Odx đồng bộ...", "INFO")
+                    on_status(f"Chưa đóng được hộp thoại Vào room với mã [{room_code}]. Vui lòng kiểm tra lại mã phòng.", "WARN")
+                return
 
         # ============================================================
         # STEP C: Kiem tra da vao phong chua, neu hop le moi bam San sang (KHONG DUNG F10!)
@@ -1556,7 +1627,8 @@ class LiveLogFollower:
 def fetch_room_status(room_code, orchestrator_url=ORCHESTRATOR_URL, access_key=ACCESS_KEY):
     if not room_code:
         return None
-    url = f"{orchestrator_url.rstrip('/')}/rooms/{str(room_code).strip().upper()}"
+    clean_code = str(room_code).strip().upper()
+    url = f"{orchestrator_url.rstrip('/')}/rooms/{clean_code}"
     headers = {"Authorization": f"Bearer {access_key}"}
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -1565,6 +1637,10 @@ def fetch_room_status(room_code, orchestrator_url=ORCHESTRATOR_URL, access_key=A
     try:
         with urllib.request.urlopen(req, timeout=2.5, context=ctx) as r:
             return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {"error": "NOT_FOUND", "status_code": 404}
+        return None
     except Exception:
         return None
 

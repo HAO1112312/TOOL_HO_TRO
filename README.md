@@ -13,3 +13,4 @@ Hệ thống điều phối, đồng bộ và kiểm định ghi hình Odx Captu
 2. Giải nén toàn bộ các file trong zip thả trực tiếp vào thư mục Odx Capture (nơi có file `Odx Capture.exe`).
 3. Chạy file `2_CHAY_PLAYER_TU_DONG.bat` (hoặc `CHAY_TOOL_AUTO_PILOT.bat`).
 4. Khi có bản cập nhật mới, chỉ cần mở Tool hoặc bấm `🚀 Cập Nhật Online` để tự động nâng cấp.
+
