@@ -1,0 +1,24 @@
+{
+  "role": "host",
+  "batches": [
+    "batch1-ASRM",
+    "batch2-ASRM",
+    "asm-s221-",
+    "AMRF-156-"
+  ],
+  "current_batch": "asm-s221-",
+  "sub_task": "01",
+  "task_prefix": "asm-s221-",
+  "start_index": 1,
+  "start_num": 1,
+  "total_tasks": 15,
+  "digits": 2,
+  "round_duration_seconds": 240,
+  "cooldown_between_rounds_seconds": 12,
+  "target_players": 4,
+  "udp_broadcast_port": 45454,
+  "game_process": "ArmaReforgerSteam",
+  "player_id": "2312",
+  "player_name": "Hao",
+  "auto_increment": true
+}

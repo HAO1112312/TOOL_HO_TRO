@@ -1,0 +1,9 @@
+{
+  "version": "3.1.0",
+  "version_code": 310,
+  "release_date": "2026-11-12",
+  "min_odx_version": "0.3.5",
+  "changelog": "- Tương thích hoàn toàn Odx Capture 0.3.5\n- Sửa triệt để lỗi không mở được / kẹt hộp thoại Vào room trên Máy Con\n- Ngăn chặn 100% việc tự động F10 quay solo trên Máy Con\n- Tích hợp hệ thống Tự động Cập nhật Online qua GitHub HAO1112312/TOOL_HO_TRO\n- Tích hợp Bộ thu thập & Xuất gói Log Gỡ Lỗi (Structured JSONL Telemetry)",
+  "update_url": "https://raw.githubusercontent.com/HAO1112312/TOOL_HO_TRO/main/version.json",
+  "download_url": "https://raw.githubusercontent.com/HAO1112312/TOOL_HO_TRO/main/Tool_Tu_Dong.zip"
+}

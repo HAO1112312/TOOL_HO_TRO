@@ -1,0 +1,19 @@
+bin/
+data/
+captures/
+delivery/
+export_logs/
+logs/
+_update_temp/
+__pycache__/
+*.pyc
+Odx Capture.exe
+*.log
+room_code.txt
+test_*.py
+TEST_*.bat
+CAT_*.bat
+CHAY_TEST_*.bat
+CHAY_THU_NGHIEM_*.bat
+Tool_Tu_Dong/
+!Tool_Tu_Dong.zip

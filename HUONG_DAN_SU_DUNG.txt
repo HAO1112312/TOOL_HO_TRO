@@ -1,0 +1,52 @@
+========================================================================
+     HƯỚNG DẪN SỬ DỤNG BỘ TOOL TỰ ĐỘNG HÓA ODX CAPTURE (v3.0)
+             GIAO DIỆN HIỆN ĐẠI (STUDIO UX/UI) & BACKEND ĐỒNG BỘ
+========================================================================
+
+⭐ BƯỚC 1: CÀI ĐẶT
+- Giải nén toàn bộ các file trong 'Tool_Tu_Dong.zip' vào thẳng 
+  thư mục Odx Capture gốc của bạn (nơi có file 'Odx Capture.exe' và thư mục 'bin').
+
+------------------------------------------------------------------------
+⭐ BƯỚC 2: CÁC CÁCH KHỞI ĐỘNG CỰC KỲ ĐƠN GIẢN
+------------------------------------------------------------------------
+
+👉 CÁCH 1 (KHUYÊN DÙNG CHO CẢ HOST VÀ PLAYER):
+   - Nhấp đúp file 'CHAY_TOOL_AUTO_PILOT.bat'.
+   - Giao diện đồ họa Studio hiện đại sẽ mở lên. Bạn có thể bấm chọn tab
+     [👑 MÁY CHỦ (HOST)] hoặc [🎮 MÁY CON (PLAYER)] tùy theo vai trò của mình.
+
+👉 CÁCH 2 (MỞ THẲNG THEO VAI TRÒ):
+   - Nếu là MÁY CHỦ (HOST)  : Nhấp đúp '1_CHAY_HOST_TU_DONG.bat'.
+   - Nếu là MÁY CON (PLAYER): Nhấp đúp '2_CHAY_PLAYER_TU_DONG.bat'.
+
+------------------------------------------------------------------------
+⭐ BƯỚC 3: QUY TRÌNH QUAY CHO MÁY CHỦ (HOST)
+------------------------------------------------------------------------
+1. Khởi động game Arma Reforger trước (chế độ Borderless hoặc Windowed).
+2. Chạy '1_CHAY_HOST_TU_DONG.bat' (chọn Yes khi hỏi quyền Admin).
+3. Trên giao diện Host:
+   - Chọn Batch cần quay: 'batch1-ASRM', 'batch2-ASRM' hoặc 'asm-s221-'.
+   - Bấm nút [Mở Odx Capture (Tạo Room)] -> Bấm [Tạo room] trên Odx Capture.
+   - Bấm [Copy Mã] và gửi mã phòng 6 ký tự cho 3 thành viên qua Discord/Zalo.
+4. Khi thấy Roster hiện đủ [4/4 SẴN SÀNG]:
+   - Bắt đầu quay: Bấm nút [BẮT ĐẦU (F10)] trên giao diện hoặc BẤM PHÍM F10 TRỰC TIẾP TRONG GAME.
+   - Khi đủ 4 phút: Bấm [F10] trong game để dừng (hoặc Tool tự động dừng sau 240s).
+   - Hủy nếu có lỗi: Bấm [F11] trong game (đếm ngược 3s rồi chuyển sang task -fix).
+5. Khi quay xong: Tool tự động quét 8 file, kiểm tra role chuột, tự vá camera null (Auto-Heal) và báo PASS 100%!
+
+------------------------------------------------------------------------
+⭐ BƯỚC 4: QUY TRÌNH QUAY CHO MÁY CON (PLAYER)
+------------------------------------------------------------------------
+1. Cắm tai nghe (kiểm tra có âm thanh) và khởi động game Arma Reforger.
+2. Chạy '2_CHAY_PLAYER_TU_DONG.bat' (chọn Yes khi hỏi quyền Admin).
+3. Nhập mã phòng 6 ký tự do Host gửi -> Bấm [KẾT NỐI VÀO PHÒNG].
+4. Cửa sổ Odx Capture sẽ TỰ ĐỘNG BẬT LÊN MÀN HÌNH và tự động tích xanh (Auto-Ready).
+   (Không chạy ngầm, không bị kẹt ở màn hình khởi động!).
+5. Bạn chỉ cần vào game chơi bình thường. Mọi thao tác bắt đầu, đếm giờ, kết thúc, lưu trữ và kiểm định đều tự động đồng bộ theo lệnh của Host suốt các task.
+
+------------------------------------------------------------------------
+⭐ BƯỚC 5: CƠ CHẾ BẢO VỆ & AN TOÀN TUYỆT ĐỐI
+------------------------------------------------------------------------
+- KHI BẤM DẤU [X] ĐỂ TẮT: Hệ thống tự động kích hoạt SetConsoleCtrlHandler và Windows Job Object, ép tắt sạch sẽ 100% mọi tiến trình Odx chạy ngầm, không bao giờ để sót tiến trình rác hay kẹt phím F10.
+- NẾU BỊ KẸT PHÍM F10 TỪ TRƯỚC: Chỉ cần nhấp đúp file '4_TAT_HET_ODX_CHONG_KET.bat', tool sẽ quét dọn sạch sẽ và trả lại phím F10 ngay lập tức.
