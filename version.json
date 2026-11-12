@@ -1,9 +1,9 @@
 {
-  "version": "3.1.1",
-  "version_code": 311,
+  "version": "3.1.2",
+  "version_code": 312,
   "release_date": "2026-11-12",
   "min_odx_version": "0.3.5",
-  "changelog": "- Tự động ưu tiên và hiển thị phiên bản Odx Capture mới nhất (v0.3.5 ✓) trên thanh tiêu đề\n- Thêm cơ chế kiểm tra mã phòng trước: nếu mã không tồn tại sẽ cảnh báo ngay và không gây kẹt\n- Chuẩn hóa quy trình điền mã phòng: vào room -> click CodeBox -> gõ mã -> click submit -> popup tự đóng 100%\n- Tự động đóng popup khi mã phòng sai hoặc hết hạn bằng ESC, không để kẹt giao diện",
+  "changelog": "- Tự động ưu tiên và hiển thị phiên bản Odx Capture mới nhất (v0.3.5 ✓) trên thanh tiêu đề\n- Thêm cơ chế kiểm tra mã phòng trước qua API: nếu mã không tồn tại sẽ cảnh báo ngay và không gây kẹt\n- Chuẩn hóa quy trình điền mã phòng: vào room -> click CodeBox -> gõ mã -> click submit -> popup tự đóng 100%\n- Tự động đóng popup bằng ESC khi mã phòng sai hoặc hết hạn, không để kẹt giao diện",
   "update_url": "https://raw.githubusercontent.com/HAO1112312/TOOL_HO_TRO/main/version.json",
   "download_url": "https://raw.githubusercontent.com/HAO1112312/TOOL_HO_TRO/main/Tool_Tu_Dong.zip"
 }
