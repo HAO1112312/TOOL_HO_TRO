@@ -1,11 +1,39 @@
 ========================================================================
-     HƯỚNG DẪN SỬ DỤNG BỘ TOOL TỰ ĐỘNG HÓA ODX CAPTURE (v3.0)
+     HƯỚNG DẪN SỬ DỤNG BỘ TOOL TỰ ĐỘNG HÓA ODX CAPTURE (v3.2.11)
              GIAO DIỆN HIỆN ĐẠI (STUDIO UX/UI) & BACKEND ĐỒNG BỘ
 ========================================================================
 
 ⭐ BƯỚC 1: CÀI ĐẶT
-- Giải nén toàn bộ các file trong 'Tool_Tu_Dong.zip' vào thẳng 
-  thư mục Odx Capture gốc của bạn (nơi có file 'Odx Capture.exe' và thư mục 'bin').
+- Sau khi dừng, Host và Player chờ Odx báo lưu xong đúng task, đủ 8 file
+  không rỗng và ổn định tối thiểu 1 giây trước khi kiểm định chỉ đọc.
+  Tool theo đúng thư mục Odx báo lưu; chờ/thử lại trong 90 giây nếu VM còn
+  ghi file hoặc file đang bị khóa. Ready chỉ bật sau khi kiểm định thành công.
+  Nếu hết thời gian chờ, Player hiện nguyên nhân và nút KIỂM ĐỊNH LẠI;
+  nút này kiểm tra lại dữ liệu trong phòng hiện tại, không mở lại hoặc đóng Odx.
+- Khi đủ thời lượng, tool gọi trực tiếp hành động Kết thúc round của đúng
+  cửa sổ Odx Host/task qua accessibility. Luồng dừng không gửi F10 toàn cục,
+  không phụ thuộc cửa sổ VMware đang được chọn hoặc phím Ctrl/Alt đang giữ.
+  Tool xác minh Host, task và phiên room, gọi một lần rồi chờ xác nhận kết thúc.
+  Dừng round giữ nguyên Odx; chỉ đóng Odx khi bạn đóng tool.
+- Odx Capture và các tiến trình quay được giữ mở khi có lỗi hoặc thử lại.
+  Chỉ đóng toàn bộ tiến trình do tool quản lý khi bạn đóng tool.
+- Test Host/Player bằng desktop, không cần game: xem TEST_HYPER_V.txt.
+  Bật checkbox TEST trước khi tạo room; Player tự theo Host. Không tính tiến độ sản xuất.
+- Cần Python 3.10 trở lên có Tcl/Tk (Tkinter). Không cần cài pandas hoặc pywin32.
+- Nếu mới cài Python Install Manager, mở CMD trong chính máy chạy tool và gõ:
+      pymanager install 3.13
+      py -3.13 -m tkinter
+  Cửa sổ Tkinter nhỏ hiện lên nghĩa là Python/Tcl-Tk đã hoạt động. Đóng cửa sổ
+  kiểm tra rồi chạy lại file BAT. Trên máy ảo phải cài Python bên trong VM.
+- Launcher nhận cả Python cài bằng Install Manager/MSIX, kể cả alias zero-byte;
+  chỉ liệt kê bản Python đã cài và không tự tải/cài runtime khi mở tool.
+- Nếu không nhận lệnh pymanager, có thể dùng Windows installer (64-bit) tại
+  https://www.python.org/downloads/windows/ ; bật Tcl/Tk và Add Python to PATH.
+  Python đã cài nhưng Tkinter lỗi: dùng Modify/Repair để bổ sung Tcl/Tk,
+  không dùng pip install tkinter.
+- Giữ nguyên thư mục 'odx-capture-0.3.5-win-x64' đi kèm bộ tool.
+  Tool tự tìm Odx trong thư mục hiện tại, thư mục con hoặc thư mục cha.
+  Có thể chọn bản cài riêng bằng khóa 'odx_root' trong autopilot_config.json.
 
 ------------------------------------------------------------------------
 ⭐ BƯỚC 2: CÁC CÁCH KHỞI ĐỘNG CỰC KỲ ĐƠN GIẢN
@@ -15,6 +43,9 @@
    - Nhấp đúp file 'CHAY_TOOL_AUTO_PILOT.bat'.
    - Giao diện đồ họa Studio hiện đại sẽ mở lên. Bạn có thể bấm chọn tab
      [👑 MÁY CHỦ (HOST)] hoặc [🎮 MÁY CON (PLAYER)] tùy theo vai trò của mình.
+   - Cửa sổ tự chọn kích thước vừa màn hình. Khi bạn đổi kích thước/vị trí hoặc
+     phóng to, tool nhớ cho lần mở sau trong autopilot_ui.json của riêng máy đó.
+     Nội dung trạng thái/cảnh báo dài tự xuống dòng; không cần kéo khung để đọc.
 
 👉 CÁCH 2 (MỞ THẲNG THEO VAI TRÒ):
    - Nếu là MÁY CHỦ (HOST)  : Nhấp đúp '1_CHAY_HOST_TU_DONG.bat'.
@@ -27,13 +58,66 @@
 2. Chạy '1_CHAY_HOST_TU_DONG.bat' (chọn Yes khi hỏi quyền Admin).
 3. Trên giao diện Host:
    - Chọn Batch cần quay: 'batch1-ASRM', 'batch2-ASRM' hoặc 'asm-s221-'.
-   - Bấm nút [Mở Odx Capture (Tạo Room)] -> Bấm [Tạo room] trên Odx Capture.
+   - Bấm [Mở Odx Capture (Tạo Room)] một lần; tool tự mở Odx và bấm [Tạo room].
+   - Chờ mã phòng 6 ký tự được xác nhận; không cần bấm lại trên cửa sổ Odx.
+   - Tool chờ giao diện và nguồn quay Odx tải xong trước khi tạo/vào room.
+     Lúc khởi động chậm, dòng ĐANG CHỜ ODX được giữ trong khi thử đọc lại,
+     không báo lỗi ngay chỉ vì cửa sổ đã xuất hiện nhưng danh sách chưa có.
+   - Nếu chưa tạo được phòng, xem lỗi và bấm [THỬ TẠO ROOM LẠI]; tool giữ cửa sổ Odx hiện tại.
+   - Sau khi Odx mở, tool xác nhận lại bộ xử lý F10 trước khi cho quay. Log HOTKEY
+     ghi nhận phím đi qua Auto-Pilot; khi chọn task tiếp, task -fix1 chuyển sang task gốc kế tiếp.
+     Ví dụ zukumi-03-fix1 -> zukumi-04, không quay lại zukumi-03-fix1.
    - Bấm [Copy Mã] và gửi mã phòng 6 ký tự cho 3 thành viên qua Discord/Zalo.
 4. Khi thấy Roster hiện đủ [4/4 SẴN SÀNG]:
    - Bắt đầu quay: Bấm nút [BẮT ĐẦU (F10)] trên giao diện hoặc BẤM PHÍM F10 TRỰC TIẾP TRONG GAME.
-   - Khi đủ 4 phút: Bấm [F10] trong game để dừng (hoặc Tool tự động dừng sau 240s).
-   - Hủy nếu có lỗi: Bấm [F11] trong game (đếm ngược 3s rồi chuyển sang task -fix).
-5. Khi quay xong: Tool tự động quét 8 file, kiểm tra role chuột, tự vá camera null (Auto-Heal) và báo PASS 100%!
+   - Thời lượng mặc định là 240 ± 5 giây. Host có thể sửa thời lượng, khoảng random,
+     số máy và thời gian nghỉ ở phần thông số chung. Player nhận đúng giá trị Host đã chọn.
+   - Đồng hồ tool và HUD chỉ chạy từ mốc ghi thật của recorder Odx, sau đếm ngược.
+     Tool không cộng thời gian chuẩn bị vào bản quay và không đoán cố định thêm 3 giây.
+   - Chỉ có hai nút điều khiển quay: [BẮT ĐẦU (F10)] và [DỪNG KHẨN CẤP (F10)].
+   - Khi đang quay/đếm ngược, bấm F10 lần nữa để dừng khẩn cấp bằng chính F10.
+     Nếu chưa gửi lệnh bắt đầu, tool hủy chuẩn bị mà không phát thêm phím.
+   - Chờ Odx xử lý xong, bấm F11 để CHỌN mã task -fix (tên thư mục), rồi bấm F10 để quay.
+     F11 không phát lệnh quay và không tự xếp lệnh quay chờ đồng bộ.
+     Nếu muốn chọn và quay thẳng task tiếp, bấm F10 tại bảng lựa chọn.
+     Dừng khẩn cấp không tự kiểm định hoặc tự tăng tiến độ task.
+     Ba nút trên tool chỉ CHỌN mã: TASK -FIX / TASK TIẾP / TASK GỐC; sau đó bấm F10 để quay.
+     CHỌN TASK GỐC (F9) chọn lại task gốc từ đầu, không đưa về task 01 của batch.
+     F9 không cho phép ghi đè: nếu tên task đã có trên Host hoặc Player, hãy chọn
+     F11 để dùng mã -fix chưa tồn tại rồi bấm F10. Thư mục rỗng và bản cancelled cũng giữ chỗ tên.
+   - F11 chỉ có tác dụng chọn -fix khi bảng lựa chọn xuất hiện; không gửi F11 sang Odx.
+   - Khi đang kết thúc hoặc kiểm định, chờ hoàn tất rồi mới dùng phím tiếp.
+     Tool chờ xác nhận dừng tối đa 30 giây, sau đó chờ kết quả Odx trước khi cho chọn FIX.
+     Nếu chưa rõ trạng thái, tool giữ task và không gửi lại F10 để tránh bật quay lại.
+   - F8/F9: Kết thúc bằng F10 và chờ Odx xử lý xong trước khi về mã task gốc.
+5. Khi kết thúc tự động đủ thời lượng: Tool kiểm tra 8 file và dữ liệu chuột theo chế độ CHỈ ĐỌC.
+   Chỉ tăng task khi kiểm định cục bộ đạt và nhận ALL OK từ đủ 4 máy.
+   Nếu thiếu xác nhận hoặc kiểm định lỗi, tool giữ task hiện tại để xử lý.
+   Kiểm định không tự sửa CSV hoặc tạo dữ liệu camera thay thế.
+6. Ô 'Tổng' giới hạn số task gốc đã hoàn tất trong batch. Task -fix không bị
+   tính trùng. Tiến độ được lưu trong autopilot_progress.json để mở lại tiếp tục.
+   Khi đủ số task, tăng 'Tổng' hoặc chọn batch khác để quay tiếp.
+
+------------------------------------------------------------------------
+⭐ ĐỒNG BỘ CẤU HÌNH HOST–PLAYER
+------------------------------------------------------------------------
+- Cập nhật cùng bản 3.2.11 trên Host và mọi Player; giữ đủ các file đi kèm bộ tool.
+- Host là nguồn chung cho mã task, thời lượng đã random, quy tắc random, số máy,
+  thời gian nghỉ, tiến trình round và các lựa chọn hiển thị HUD.
+- Các ô thời lượng/random/nghỉ/số máy và các dấu chọn HUD trên Host được truyền
+  cho Player. Kích thước, độ trong và ngôn ngữ HUD dùng các khóa hud_scale,
+  hud_opacity, hud_language trong cấu hình Host và cũng được truyền sang Player.
+- Player hiển thị trạng thái đồng bộ. Host chờ các Player áp dụng đúng bản cấu hình
+  trước khi phát lệnh bắt đầu; bản quay đang chạy không đổi thời lượng giữa chừng.
+- Mỗi lần yêu cầu quay cần xác nhận mới. Player có sẵn tên task sẽ không xác nhận
+  hoặc bật Ready; Host chờ chọn một mã khác thay vì cho Odx ghi đè bản cũ.
+- Mã/tên Player, nguồn quay, thiết bị âm thanh và đường dẫn riêng của mỗi máy được giữ lại.
+- Cùng LAN hoặc mạng máy ảo có liên lạc trực tiếp: để trống IP Host để tự tìm.
+  Nếu không tự tìm được, nhập IP hoặc IP:45455 của Host ở tab Player.
+- Kênh cấu hình dùng TCP 45455 và tìm Host qua UDP 45454. Windows cần cho phép
+  kết nối giữa các máy trên mạng đang dùng. Khác mạng Internet cần địa chỉ Host
+  có thể truy cập hoặc VPN chung; kênh này không tự vượt NAT nhờ room của Odx.
+- Nếu chưa đồng bộ, tool hiển thị lỗi và chưa cho quay; không âm thầm dùng thông số khác.
 
 ------------------------------------------------------------------------
 ⭐ BƯỚC 4: QUY TRÌNH QUAY CHO MÁY CON (PLAYER)
@@ -43,10 +127,53 @@
 3. Nhập mã phòng 6 ký tự do Host gửi -> Bấm [KẾT NỐI VÀO PHÒNG].
 4. Cửa sổ Odx Capture sẽ TỰ ĐỘNG BẬT LÊN MÀN HÌNH và tự động tích xanh (Auto-Ready).
    (Không chạy ngầm, không bị kẹt ở màn hình khởi động!).
+   Sau khi kết nối, Auto-Ready hoạt động khi Odx bị che, thu nhỏ hoặc nằm ngoài màn hình.
+   Tool gọi hành động của nút ở nền, không click theo tọa độ và không phát F10/Space.
+   Nếu Windows chưa cung cấp được cây điều khiển, tool có thể khôi phục tạm cửa sổ
+   do chính nó mở rồi trả lại trạng thái/vị trí cũ; không yêu cầu giữ Odx nổi phía trước.
+   Chỉ hiện Ready thành công sau khi server xác nhận đúng Player trong đúng phòng.
+   Sau khi hoàn tất hoặc dừng sớm một task, Player tự sẵn sàng lại khi Odx đã
+   kết thúc round, kể cả lúc Host đang chọn -fix/task tiếp hoặc giữ task cũ.
+   Ready không cho phép quay đè: task đã có vẫn không được ACK để bắt đầu,
+   Host phải chọn mã hợp lệ trước F10. Kiểm định FAIL vẫn được báo và chặn Ready.
+   Khi đang quay/đếm ngược/lưu hoặc kiểm định chưa xong, tool không tự đổi Ready.
 5. Bạn chỉ cần vào game chơi bình thường. Mọi thao tác bắt đầu, đếm giờ, kết thúc, lưu trữ và kiểm định đều tự động đồng bộ theo lệnh của Host suốt các task.
 
 ------------------------------------------------------------------------
 ⭐ BƯỚC 5: CƠ CHẾ BẢO VỆ & AN TOÀN TUYỆT ĐỐI
 ------------------------------------------------------------------------
-- KHI BẤM DẤU [X] ĐỂ TẮT: Hệ thống tự động kích hoạt SetConsoleCtrlHandler và Windows Job Object, ép tắt sạch sẽ 100% mọi tiến trình Odx chạy ngầm, không bao giờ để sót tiến trình rác hay kẹt phím F10.
-- NẾU BỊ KẸT PHÍM F10 TỪ TRƯỚC: Chỉ cần nhấp đúp file '4_TAT_HET_ODX_CHONG_KET.bat', tool sẽ quét dọn sạch sẽ và trả lại phím F10 ngay lập tức.
+- KHI BẤM [X] TRÊN GIAO DIỆN: Nếu đang quay, tool yêu cầu dừng/lưu và chờ
+  xác nhận trước khi đóng. Máy con chờ Host dừng và lưu xong.
+- Khi đang mở hoặc vào room, bạn có thể đóng tool để hủy các thao tác đang chờ.
+  Khi tool đóng, Odx, recorder và các tiến trình con do phiên tool đó mở đóng theo.
+- Lỗi tạo/vào room, trùng Player ID, mất mạng, thử lại, F10 dừng khẩn cấp hoặc
+  làm mới kết nối không đóng Odx. Nút Làm mới kết nối dùng lại cửa sổ hiện tại.
+- Chỉ các tiến trình do tool quản lý được dọn khi thoát. FFmpeg của ứng dụng
+  khác không bị dừng. Không đóng cưỡng chế cửa sổ console khi đang ghi hình.
+- Không chạy đồng thời hai cửa sổ Auto-Pilot trên cùng máy. Nếu Odx đã mở
+  bên ngoài tool, hãy đóng phiên đó rồi mở Odx từ Auto-Pilot.
+  Tool xác minh file chương trình Odx; ứng dụng khác trùng tên cửa sổ không bị chặn.
+- Nếu kết nối bị kẹt, thử Làm mới kết nối sau khi thao tác hiện tại đã kết thúc.
+  File '4_TAT_HET_ODX_CHONG_KET.bat' và --cleanup không còn dừng tiến trình;
+  chúng chỉ nhắc đóng tool nếu bạn muốn kết thúc Odx.
+- Mỗi Host/Player phải dùng Player ID riêng. Sao chép bộ tool sang VM có thể
+  mang theo ID của Host; đổi ID trên Player trước khi kết nối. Ví dụ test:
+  Host 2312, Player thứ nhất 2313, Player thứ hai 2314, Player thứ ba 2315.
+- Vào room chỉ thành công khi giao diện Odx và server cùng xác nhận đúng
+  mã phòng/Player; điền CodeBox hoặc đóng hộp thoại chưa được tính là vào room.
+
+------------------------------------------------------------------------
+⭐ KIỂM TRA MÔI TRƯỜNG, KIỂM THỬ VÀ CẬP NHẬT
+------------------------------------------------------------------------
+- '5_KIEM_TRA_MOI_TRUONG.bat': kiểm tra Python, Tkinter, Odx và cấu hình.
+- '6_CHAY_KIEM_THU.bat': chạy các kiểm thử hồi quy; không chạy game/quay thật.
+- '3_KIEM_TRA_PASS.bat': kiểm định chỉ đọc các capture trong bản Odx đã chọn.
+  Có thể kéo thư mục capture thả vào file BAT để kiểm tra riêng thư mục đó.
+- Chỉ cập nhật khi đã hoàn tất quay/lưu. Gói ZIP được kiểm tra trước khi cài;
+  nếu thay file thất bại, trình cập nhật khôi phục các file đã thay.
+- Cấu hình cá nhân, odx-capture.json, dữ liệu quay và log được giữ lại.
+  Trạng thái cài đặt được ghi trong update_status.json và hiển thị khi mở lại.
+- Bản mã nguồn trước đợt sửa nằm trong '_backups'. Không ghi đè dữ liệu quay
+  bằng bản sao lưu mã nguồn.
+
+- Khi cập nhật/gửi cho Player: giữ đủ các file, gồm odx_uia.py hỗ trợ Auto-Ready nền.

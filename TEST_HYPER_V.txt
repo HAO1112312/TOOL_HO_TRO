@@ -1,0 +1,91 @@
+TEST ĐỒNG BỘ HOST – PLAYER TRONG MÁY ẢO (v3.2.11)
+
+Mục đích: quay desktop thật trên từng Windows để thử đồng bộ, F10, thời lượng,
+random, HUD, Ready, chọn -fix và chặn trùng task mà không cần mở game.
+Đây vẫn là bản quay thật do Odx thực hiện, không mô phỏng dữ liệu đầu ra.
+Các bước cài Python và chạy tool cũng áp dụng cho VM Windows trong VMware.
+Sau task, VM có thể cần thêm thời gian để Odx hoàn tất file. Tool chờ đủ bộ
+file ổn định rồi kiểm định, thử lại trong 90 giây trước khi kết luận chưa đạt.
+PASS cục bộ tự bật Ready khi room đã kết thúc; nếu còn lỗi, xem nguyên nhân
+trong AUDIT và bấm KIỂM ĐỊNH LẠI ngay trên Player, không cần kết nối lại.
+
+1. Chuẩn bị
+- Chạy Host trên Windows chính; chạy Player bên trong từng máy ảo Windows.
+- Chép nguyên bộ tool cùng thư mục Odx vào ổ đĩa riêng của mỗi VM.
+  Không dùng chung thư mục captures giữa các máy.
+- Mỗi máy cần Python 3.10+ có Tkinter và Player ID khác nhau.
+- Khi chép tool vào VM, đổi Player ID nếu cấu hình vẫn giống Host.
+  Ví dụ test Host 2312 thì VM đầu dùng 2313; không để cả hai cùng 2312.
+- Nếu dùng Python Install Manager, chạy trong CMD bên trong từng VM:
+      pymanager install 3.13
+      py -3.13 -m tkinter
+  Khi cửa sổ Tkinter hiện lên, đóng nó rồi mở lại tool. Cài Python ở Windows
+  chính không tự cài Python vào máy ảo. Xem thêm HUONG_DAN_SU_DUNG.txt.
+- Cho Host và VM dùng mạng truy cập được nhau. Nếu dùng External Switch,
+  chọn cho hệ điều hành quản lý dùng chung card mạng trong Hyper-V Manager.
+- Cả Odx và tool vẫn cần tới được dịch vụ phòng/thời gian của Odx.
+
+2. Trên Host
+- Chạy CHAY_TOOL_AUTO_PILOT.bat, chọn HOST.
+- TRƯỚC KHI tạo room, đánh dấu:
+  [TEST đồng bộ: quay toàn màn hình, không cần game].
+- Tạo batch riêng, ví dụ TEST-SYNC; không dùng batch đang quay sản xuất.
+- Thử ngắn trước: Thời lượng 30s, Random ± 0s, Nghỉ 3s, Số máy 2.
+  Số máy tính cả Host: Host + 1 VM = 2; Host + 3 VM = 4.
+- Bấm Mở Odx Capture (Tạo Room). Tool chuẩn bị nguồn Màn hình chính và
+  Không có (chỉ giữ dữ liệu thô) trước khi tạo phòng.
+- Nếu Odx khởi động chậm, chờ dòng ĐANG CHỜ ODX. Tool thử đọc lại nguồn quay
+  tối đa 30 giây sau khi thấy cửa sổ; chỉ tạo room khi xác nhận cấu hình xong.
+- Chép mã room cho các VM. Để kiểm tra đúng desktop, đóng game trên các máy;
+  profile mà dịch vụ Odx cấp cho phòng có thể ưu tiên cửa sổ game đang chạy.
+
+3. Trong từng VM
+- Mở tool, chọn PLAYER, nhập Player ID riêng và mã room.
+- Nếu không tìm thấy Host tự động, điền địa chỉ IPv4 của Host ở ô IP Host.
+  Địa chỉ đó phải truy cập được từ VM; tool dùng TCP 45455 cho cấu hình và
+  UDP 45454 cho tìm Host. Chỉ cần nhập IP khi broadcast không qua được switch.
+- Bấm Kết nối. Player tự lấy chế độ TEST từ Host trước khi vào room,
+  chọn nguồn màn hình chính và chỉ Ready khi áp dụng đúng cấu hình.
+- Khi hệ điều hành hỏi quyền mạng, cho Python/tool giao tiếp trên mạng đang dùng.
+  Có thể kiểm tra từ PowerShell trong VM:
+      Test-NetConnection <IP-HOST> -Port 45455
+  Chạy kiểm tra sau khi Host đã tạo room và có dòng Đồng bộ Host.
+
+4. Thử quay
+- Giữ desktop VM đăng nhập và hoạt động, không khóa hoặc disconnect phiên
+  trong lượt thử đầu. Bắt đầu với một VM, sau đó tăng dần tới ba VM.
+- Chờ đủ số máy Ready và cả Host/Player có nhãn TEST.
+- Bấm nút Bắt đầu trên Host; cách này tránh VMConnect giữ phím F10 vật lý.
+- Sau đếm ngược native, đồng hồ Host/Player/HUD phải bắt đầu theo mốc ghi thật.
+- Di chuột và bấm phím bình thường bên trong mỗi Windows để có input thực.
+  Nếu raw/input_events.csv trống, kiểm định sẽ báo lỗi; tool không tạo input giả.
+- Một lượt để chạy đủ thời lượng, chờ Odx xử lý và ALL OK rồi thử lượt tiếp.
+- Có thể giữ focus trong VMware khi hết giờ: tool gọi Kết thúc round trực tiếp
+  trên đúng Odx Host. Lệnh chưa rõ kết quả không bị bấm lặp làm quay lại.
+  Nếu mạng/room chưa xác nhận, tool báo trạng thái chờ và giữ Odx mở.
+- Một lượt bấm Dừng khẩn cấp trước thời lượng: phải hiện ba lựa chọn.
+  Khi Odx kết thúc round, các Player tự Ready lại trong khi Host đang chọn.
+  Host giữ nguyên task đã quay cũng không làm Player kẹt Ready; task cũ vẫn
+  bị chặn khi định bắt đầu lại, cần chọn task tiếp hoặc -fix chưa tồn tại.
+  F11 chỉ chọn mã -fix; bấm F10 mới quay. Task đã có phải bị chặn trên mọi máy.
+- HUD có [TEST]. PASS TEST vẫn cần kiểm định dữ liệu cục bộ và ALL OK của Odx,
+  nhưng không ghi hoàn tất vào autopilot_progress.json của task sản xuất.
+- Mở captures trong mỗi Windows để xem video.mp4 có quay đúng desktop đó.
+
+5. Quay lại chế độ game
+- Đóng tool trên từng máy để kết thúc Odx, mở tool lại rồi tắt TEST trên Host.
+- Tạo room mới và kết nối Player lại. Tool khôi phục nguồn/profile trước TEST
+  khi khởi chạy Odx bình thường; giữ các lựa chọn người dùng đã tự thay đổi.
+- Không đổi TEST trong một phòng đang mở, vì Odx chốt nguồn lúc tạo/join room.
+- Lỗi hoặc Làm mới kết nối không đóng cửa sổ Odx. Chỉ đóng tool mới kết thúc
+  Odx và các tiến trình liên quan do tool đó mở; không cần xóa thư mục quay.
+
+Lưu ý: chế độ TEST không bảo đảm mọi cấu hình VM đều ghi được hình/âm thanh.
+Odx có đường mã hóa CPU khi không có GPU NVIDIA; ba VM quay đồng thời có thể
+tốn nhiều CPU/ổ đĩa. Lỗi probe, encoder, mạng, đồng hồ hoặc kiểm định vẫn được
+báo thật và không được bỏ qua để gắn PASS. Chưa xác nhận quay thực tế trên VM
+của bạn bằng các kiểm thử hồi quy của source.
+
+Tài liệu Microsoft:
+https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/get-started/create-a-virtual-switch-for-hyper-v-virtual-machines
+https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/enhanced-session-mode

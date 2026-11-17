@@ -1,14 +1,8 @@
 @echo off
 chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
-title KIEM TRA PASS (ODX VALIDATE)
-echo ===================================================================
-echo               CONG CU KIEM TRA PASS CHUAN ADMIN (ODX VALIDATE)
-echo ===================================================================
-if "%~1"=="" (
-    python odx_check_pass.py
-) else (
-    python odx_check_pass.py "%~1"
-)
-echo.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0odx_launch.ps1" --check %*
+set "ODX_EXIT=%errorlevel%"
 pause
+exit /b %ODX_EXIT%

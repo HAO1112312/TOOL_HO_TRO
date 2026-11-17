@@ -1,10 +1,10 @@
 """
 ODX CAPTURE AUTO-PILOT SUITE - BACKEND CORE ENGINE (v3.0)
 - Kien truc Backend chat che, tach biet hoan toan logic xu ly va giao dien Frontend.
-- Windows Job Object + SetConsoleCtrlHandler: Tu dong kill 100% moi tien trinh Odx khi dong tool (bam [X]).
+- Windows Job Object + SetConsoleCtrlHandler: Don dep dung cay tien trinh do tool khoi chay.
 - Dong bo thoi gian NTP chuan xac (time.windows.com).
 - Quan ly phong va theo doi 4 thanh vien real-time qua Orchestrator API.
-- Tu dong kiem dinh 8 file, Role chuot va tu dong va ma tran camera null (Auto-Heal).
+- Kiem dinh dau ra chi doc; sua camera la thao tac rieng co luu ban goc.
 - Dieu khien Host va Player dong bo tuyet doi.
 """
 
@@ -15,11 +15,16 @@ import json
 import subprocess
 import re
 import random
+import math
 import ctypes
 import threading
 import ssl
 import urllib.request
 import base64
+import hashlib
+import tempfile
+from contextlib import contextmanager, ExitStack
+from odx_uia import ready_action_preamble
 from datetime import datetime
 from enum import Enum
 
@@ -33,57 +38,14 @@ ACCESS_KEY = "ygYmQNO5WfHbaUn0w1hMVg4ESu8nTEhd"
 
 TOOL_DIR = os.path.abspath(os.path.dirname(__file__))
 
-def get_odx_file_version(exe_path):
-    """Doc phien ban ProductVersion cua file exe tren Windows"""
-    try:
-        import win32api
-        info = win32api.GetFileVersionInfo(exe_path, "\\")
-        ms = info['FileVersionMS']
-        ls = info['FileVersionLS']
-        return (win32api.HIWORD(ms), win32api.LOWORD(ms), win32api.HIWORD(ls), win32api.LOWORD(ls))
-    except Exception:
-        pass
-    m = re.search(r"0\.(\d+)\.(\d+)", exe_path)
-    if m:
-        return (0, int(m.group(1)), int(m.group(2)), 0)
-    return (0, 0, 0, 0)
+import odx_runtime as _runtime
+from odx_runtime import get_odx_file_version, register_managed_process, setup_process_protection
 
 def find_all_odx_roots():
-    """Tim tat ca cac thu muc Odx Capture hop le tren may va xep hang uu tien ban moi nhat"""
-    candidates = []
-    here = TOOL_DIR
-    parent = os.path.abspath(os.path.join(here, ".."))
-    for d in [here, parent]:
-        if os.path.exists(os.path.join(d, "Odx Capture.exe")) or os.path.exists(os.path.join(d, "bin", "odx-app.exe")):
-            if d not in candidates:
-                candidates.append(d)
-
-    downloads_dir = os.path.expanduser(r"~\Downloads")
-    if os.path.exists(downloads_dir):
-        for root, dirs, files in os.walk(downloads_dir):
-            rel = os.path.relpath(root, downloads_dir)
-            if rel.count(os.sep) > 3:
-                continue
-            if "Odx Capture.exe" in files or os.path.exists(os.path.join(root, "bin", "odx-app.exe")):
-                if root not in candidates:
-                    candidates.append(root)
-
-    scored = []
-    for c in candidates:
-        app_exe = os.path.join(c, "bin", "odx-app.exe")
-        cap_exe = os.path.join(c, "Odx Capture.exe")
-        target_exe = app_exe if os.path.exists(app_exe) else cap_exe
-        v_tuple = get_odx_file_version(target_exe)
-        scored.append((v_tuple, c))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return scored
+    return _runtime.find_all_odx_roots(TOOL_DIR)
 
 def get_odx_root():
-    scored = find_all_odx_roots()
-    if scored:
-        return scored[0][1]
-    return TOOL_DIR
+    return _runtime.resolve_odx_root(TOOL_DIR)
 
 def get_odx_version_display():
     root = get_odx_root()
@@ -116,109 +78,9 @@ def is_admin():
 # ======================================================================
 # PROCESS MANAGEMENT & SYSTEM CLEANUP
 # ======================================================================
-_GLOBAL_JOB_HANDLE = None
-_GLOBAL_CTRL_HANDLER = None
-
-def cleanup_all_odx(kill_gui=True):
-    """
-    Don dep sach 100% moi tien trinh Odx ngam, Odx Capture GUI va reset Packet Monitor.
-    Giai phong hoan toan phim F10 va port ket noi.
-    """
-    try:
-        subprocess.run(["pktmon", "stop"], capture_output=True, check=False)
-        subprocess.run(["pktmon", "reset"], capture_output=True, check=False)
-    except Exception:
-        pass
-
-    try:
-        subprocess.run(["taskkill", "/F", "/T", "/IM", "odx.exe"], capture_output=True, check=False)
-        subprocess.run(["taskkill", "/F", "/T", "/IM", "odx-app.exe"], capture_output=True, check=False)
-        subprocess.run(["taskkill", "/F", "/T", "/IM", "ffmpeg.exe"], capture_output=True, check=False)
-        if kill_gui:
-            subprocess.run(["taskkill", "/F", "/T", "/IM", "Odx Capture.exe"], capture_output=True, check=False)
-    except Exception:
-        pass
-
-def setup_process_protection():
-    """
-    Gan co che bao ve kep (SetConsoleCtrlHandler + Windows Job Object):
-    Khi nguoi dung tat dot ngot (bam nut [X]), Windows se tu dong kill sach moi tien trinh con.
-    """
-    global _GLOBAL_JOB_HANDLE, _GLOBAL_CTRL_HANDLER
-    if sys.platform != "win32":
-        return
-
-    import atexit
-    atexit.register(cleanup_all_odx)
-
-    try:
-        from ctypes import wintypes
-        kernel32 = ctypes.windll.kernel32
-
-        # 1. Console Ctrl Handler (Bat su kien [X])
-        PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
-        def _ctrl_handler(ctrl_type):
-            if ctrl_type in (0, 1, 2, 5, 6): # CLOSE, C, BREAK, LOGOFF, SHUTDOWN
-                cleanup_all_odx(kill_gui=True)
-                return True
-            return False
-        _GLOBAL_CTRL_HANDLER = PHANDLER_ROUTINE(_ctrl_handler)
-        kernel32.SetConsoleCtrlHandler(_GLOBAL_CTRL_HANDLER, True)
-
-        # 2. Windows Job Object (Kernel kill-on-close)
-        job = kernel32.CreateJobObjectW(None, None)
-        if job:
-            class IO_COUNTERS(ctypes.Structure):
-                _fields_ = [
-                    ("ReadOperationCount", ctypes.c_uint64),
-                    ("WriteOperationCount", ctypes.c_uint64),
-                    ("OtherOperationCount", ctypes.c_uint64),
-                    ("ReadTransferCount", ctypes.c_uint64),
-                    ("WriteTransferCount", ctypes.c_uint64),
-                    ("OtherTransferCount", ctypes.c_uint64),
-                ]
-
-            class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
-                _fields_ = [
-                    ("PerProcessUserTimeLimit", ctypes.c_int64),
-                    ("PerJobUserTimeLimit", ctypes.c_int64),
-                    ("LimitFlags", wintypes.DWORD),
-                    ("MinimumWorkingSetSize", ctypes.c_size_t),
-                    ("MaximumWorkingSetSize", ctypes.c_size_t),
-                    ("ActiveProcessLimit", wintypes.DWORD),
-                    ("Affinity", ctypes.c_size_t),
-                    ("PriorityClass", wintypes.DWORD),
-                    ("SchedulingClass", wintypes.DWORD),
-                ]
-
-            class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
-                _fields_ = [
-                    ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
-                    ("IoInfo", IO_COUNTERS),
-                    ("ProcessMemoryLimit", ctypes.c_size_t),
-                    ("JobMemoryLimit", ctypes.c_size_t),
-                    ("PeakProcessMemoryLimit", ctypes.c_size_t),
-                    ("PeakJobMemoryLimit", ctypes.c_size_t),
-                ]
-
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
-            JobObjectExtendedLimitInformation = 9
-            info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-
-            res = kernel32.SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                ctypes.byref(info),
-                ctypes.sizeof(info)
-            )
-            if res:
-                kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess())
-                _GLOBAL_JOB_HANDLE = job
-    except Exception:
-        pass
-
-setup_process_protection()
+def cleanup_all_odx(kill_gui=True, *, tool_closing=False):
+    """Close managed Odx trees only as part of closing this tool."""
+    return _runtime.cleanup_managed_processes(kill_gui=kill_gui, tool_closing=tool_closing)
 
 # ======================================================================
 # SYSTEM NTP SYNC & GAME CHECK
@@ -234,230 +96,884 @@ def sync_system_clock():
         except Exception:
             pass
     try:
-        subprocess.run(["w32tm", "/resync", "/nowait"], capture_output=True, timeout=4)
-        return True, "Da kich hoat dong bo thoi gian Windows Time Service"
+        result = subprocess.run(["w32tm", "/resync"], capture_output=True, text=True, timeout=8)
+        if result.returncode == 0:
+            return True, "Da dong bo thoi gian Windows Time Service"
     except Exception:
         pass
     return False, "Khong the dong bo NTP tu dong (Can chay voi quyen Admin)"
 
 def is_game_running(proc_name="ArmaReforgerSteam"):
-    """
-    Kiểm tra chính xác 100% xem Game Arma Reforger có thực sự đang mở hay không.
-    Tuyệt đối không dùng tìm kiếm chuỗi lỏng lẻo trong stdout để tránh lỗi Windows
-    in lại câu lệnh/filter tiêu chí tìm kiếm gây nhận diện nhầm là Game đang mở.
-    """
-    clean_name = proc_name.replace(".exe", "").strip().lower()
-
-    # 1. Kiểm tra cửa sổ Game đang mở (FindWindow)
+    """Match actual executable names; a similarly titled window is insufficient."""
+    clean_name = os.path.basename(str(proc_name or "").strip()).lower()
+    if clean_name.endswith(".exe"):
+        clean_name = clean_name[:-4]
+    if not clean_name:
+        return False
+    accepted = {clean_name + ".exe"}
+    if clean_name == "armareforgersteam":
+        accepted.add("armareforger.exe")
     try:
-        user32 = ctypes.windll.user32
-        for title in ("Arma Reforger", "ArmaReforgerSteam", "ArmaReforger"):
-            hwnd = user32.FindWindowW(None, title)
-            if hwnd != 0:
-                return True
-    except Exception:
-        pass
+        from ctypes import wintypes
 
-    # 2. Kiểm tra trực tiếp qua Windows Kernel Toolhelp32Snapshot
-    try:
-        TH32CS_SNAPPROCESS = 0x00000002
-        class PROCESSENTRY32(ctypes.Structure):
+        class PROCESSENTRY32W(ctypes.Structure):
             _fields_ = [
-                ('dwSize', ctypes.c_ulong),
-                ('cntUsage', ctypes.c_ulong),
-                ('th32ProcessID', ctypes.c_ulong),
-                ('th32DefaultHeapID', ctypes.c_size_t),
-                ('th32ModuleID', ctypes.c_ulong),
-                ('cntThreads', ctypes.c_ulong),
-                ('th32ParentProcessID', ctypes.c_ulong),
-                ('pcPriClassBase', ctypes.c_long),
-                ('dwFlags', ctypes.c_ulong),
-                ('szExeFile', ctypes.c_char * 260)
-            ]
-        hSnapshot = ctypes.windll.kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-        if hSnapshot and hSnapshot != -1:
-            pe = PROCESSENTRY32()
-            pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
-            if ctypes.windll.kernel32.Process32First(hSnapshot, ctypes.byref(pe)):
-                while True:
-                    exe_name = pe.szExeFile.decode('utf-8', errors='ignore').strip().lower()
-                    if exe_name in (f"{clean_name}.exe", clean_name):
-                        ctypes.windll.kernel32.CloseHandle(hSnapshot)
-                        return True
-                    if clean_name == "armareforgersteam" and exe_name in ("armareforger.exe", "armareforgersteam.exe"):
-                        ctypes.windll.kernel32.CloseHandle(hSnapshot)
-                        return True
-                    if not ctypes.windll.kernel32.Process32Next(hSnapshot, ctypes.byref(pe)):
-                        break
-            ctypes.windll.kernel32.CloseHandle(hSnapshot)
-            return False
-    except Exception:
+                ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260)]
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        for function in (kernel.Process32FirstW, kernel.Process32NextW):
+            function.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+            function.restype = wintypes.BOOL
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.restype = wintypes.BOOL
+        snapshot = kernel.CreateToolhelp32Snapshot(0x00000002, 0)
+        if snapshot and snapshot != ctypes.c_void_p(-1).value:
+            try:
+                entry = PROCESSENTRY32W()
+                entry.dwSize = ctypes.sizeof(entry)
+                if kernel.Process32FirstW(snapshot, ctypes.byref(entry)):
+                    while True:
+                        if entry.szExeFile.strip().lower() in accepted:
+                            return True
+                        if not kernel.Process32NextW(snapshot, ctypes.byref(entry)):
+                            return False
+                elif ctypes.get_last_error() == 18:  # ERROR_NO_MORE_FILES
+                    return False
+            finally:
+                kernel.CloseHandle(snapshot)
+    except (OSError, AttributeError, ValueError, ctypes.ArgumentError):
         pass
 
-    # 3. Fallback qua tasklist CSV: Chỉ chấp nhận dòng CSV hợp lệ chứa PID số thực tế
+    # Native enumeration can be unavailable in a restricted Windows session.
     try:
-        res = subprocess.run(
-            ["tasklist", "/FO", "CSV", "/NH", "/FI", f"IMAGENAME eq {clean_name}.exe"],
-            capture_output=True, text=True, timeout=3
-        )
-        for line in res.stdout.splitlines():
-            line = line.strip()
-            if not line or line.startswith("INFO:") or line.startswith("Thông tin:"):
-                continue
-            parts = [p.strip('"') for p in line.split('","')]
-            if len(parts) >= 2 and parts[1].isdigit():
-                img = parts[0].lower()
-                if img in (f"{clean_name}.exe", clean_name) or (clean_name == "armareforgersteam" and img in ("armareforger.exe", "armareforgersteam.exe")):
+        import csv
+        result = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=3)
+        if result.returncode == 0:
+            for row in csv.reader(result.stdout.splitlines()):
+                if len(row) >= 2 and row[1].isdigit() and row[0].strip().lower() in accepted:
                     return True
-        return False
-    except Exception:
-        return False
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return False
 
 # ======================================================================
 # WINDOWS & HOTKEY HELPERS
 # ======================================================================
+def _window_process_path(hwnd):
+    from ctypes import wintypes
+    user = ctypes.WinDLL("user32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user.GetWindowThreadProcessId.restype = wintypes.DWORD
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    kernel.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    pid = wintypes.DWORD()
+    if not user.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)) or not pid.value:
+        return None, None
+    process = kernel.OpenProcess(0x1000, False, pid.value)
+    if not process:
+        return None, None
+    try:
+        size = wintypes.DWORD(32768)
+        path = ctypes.create_unicode_buffer(size.value)
+        if kernel.QueryFullProcessImageNameW(process, 0, path, ctypes.byref(size)):
+            return pid.value, path.value
+    finally:
+        kernel.CloseHandle(process)
+    return None, None
+
+
+def _is_odx_executable(path):
+    return bool(path) and os.path.basename(path).lower() in ("odx-app.exe", "odx capture.exe")
+
+
+def _is_selected_odx_path(path):
+    if not _is_odx_executable(path):
+        return False
+    try:
+        root = os.path.normcase(os.path.realpath(ODX_ROOT))
+        candidate = os.path.normcase(os.path.realpath(path))
+        return os.path.commonpath([root, candidate]) == root
+    except (OSError, ValueError):
+        return False
+
+
+def is_managed_odx_window(hwnd):
+    try:
+        pid, path = _window_process_path(hwnd)
+        return _is_selected_odx_path(path) and _runtime.owns_pid(pid)
+    except (OSError, AttributeError, ValueError, ctypes.ArgumentError):
+        return False
+
+
 def find_odx_window():
-    user32 = ctypes.windll.user32
-    return user32.FindWindowW(None, "Odx Capture")
+    """Find only an Odx window from the selected installation, with 64-bit handles."""
+    try:
+        from ctypes import wintypes
+        user = ctypes.WinDLL("user32", use_last_error=True)
+        user.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        user.FindWindowW.restype = wintypes.HWND
+        candidate = user.FindWindowW(None, "Odx Capture")
+        if candidate and _is_selected_odx_path(_window_process_path(candidate)[1]):
+            return candidate
+        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        user.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+        user.EnumWindows.restype = wintypes.BOOL
+        user.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user.GetWindowTextW.restype = ctypes.c_int
+        found = []
+
+        def visit(hwnd, _):
+            title = ctypes.create_unicode_buffer(256)
+            if user.GetWindowTextW(hwnd, title, len(title)) and title.value == "Odx Capture":
+                if _is_selected_odx_path(_window_process_path(hwnd)[1]):
+                    found.append(hwnd)
+                    return False
+            return True
+
+        user.EnumWindows(callback_type(visit), 0)
+        return found[0] if found else 0
+    except (OSError, AttributeError, ValueError, ctypes.ArgumentError):
+        return 0
+
+
+def find_unmanaged_odx_window():
+    """Return any unowned Odx window, including one from another installation.
+
+    A foreign Odx may own the global F10/F11 hotkeys even when its executable is
+    outside our selected root or its window is hidden. A matching caption alone
+    is insufficient: unrelated applications can also have an "Odx Capture" window.
+    """
+    try:
+        from ctypes import wintypes
+        user = ctypes.WinDLL("user32", use_last_error=True)
+        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        user.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+        user.EnumWindows.restype = wintypes.BOOL
+        user.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user.GetWindowTextW.restype = ctypes.c_int
+        found = []
+
+        def visit(hwnd, _):
+            title = ctypes.create_unicode_buffer(256)
+            if user.GetWindowTextW(hwnd, title, len(title)) and title.value == "Odx Capture":
+                try:
+                    pid, path = _window_process_path(hwnd)
+                except (OSError, AttributeError, ValueError, ctypes.ArgumentError):
+                    return True
+                if not pid or not _is_odx_executable(path):
+                    return True
+                try:
+                    owned = _runtime.owns_pid(pid)
+                except (OSError, AttributeError, ValueError, ctypes.ArgumentError):
+                    owned = False
+                if not owned:
+                    found.append(hwnd)
+                    return False
+            return True
+
+        user.EnumWindows(callback_type(visit), 0)
+        return found[0] if found else None
+    except (OSError, AttributeError, ValueError, ctypes.ArgumentError):
+        return None
+
+
+def _ps_literal(value):
+    """A PowerShell literal, including quotes, for arbitrary user text."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+def _clipboard_apis():
+    from ctypes import wintypes
+    user = ctypes.WinDLL("user32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    user.OpenClipboard.argtypes = [wintypes.HWND]
+    user.OpenClipboard.restype = wintypes.BOOL
+    user.CloseClipboard.argtypes = []
+    user.CloseClipboard.restype = wintypes.BOOL
+    user.EmptyClipboard.argtypes = []
+    user.EmptyClipboard.restype = wintypes.BOOL
+    user.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
+    user.SetClipboardData.restype = ctypes.c_void_p
+    user.GetClipboardData.argtypes = [wintypes.UINT]
+    user.GetClipboardData.restype = ctypes.c_void_p
+    kernel.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    kernel.GlobalAlloc.restype = ctypes.c_void_p
+    kernel.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel.GlobalLock.restype = ctypes.c_void_p
+    kernel.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel.GlobalUnlock.restype = wintypes.BOOL
+    kernel.GlobalFree.argtypes = [ctypes.c_void_p]
+    kernel.GlobalFree.restype = ctypes.c_void_p
+    kernel.GetConsoleWindow.argtypes = []
+    kernel.GetConsoleWindow.restype = wintypes.HWND
+    return user, kernel
+
 
 def set_clipboard(text):
-    """Set clipboard tuc thi bang Windows API (0.1ms, khong dung powershell gay lag)."""
+    """Transfer Unicode text only after allocation, locking and Win32 ownership succeed."""
     text = str(text)
+    memory = None
+    kernel = None
+    transferred = False
     try:
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-        kernel32.GlobalAlloc.restype = ctypes.c_void_p
-        kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
-        kernel32.GlobalLock.restype = ctypes.c_void_p
-        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
-        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
-        user32.SetClipboardData.restype = ctypes.c_void_p
-        user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
-
-        CF_UNICODETEXT = 13
-        GHND = 0x0042
-        
-        text_bytes = (text + '\0').encode('utf-16le')
-        for _ in range(5):
-            if user32.OpenClipboard(None):
-                user32.EmptyClipboard()
-                h_mem = kernel32.GlobalAlloc(GHND, len(text_bytes))
-                if h_mem:
-                    ptr = kernel32.GlobalLock(h_mem)
-                    if ptr:
-                        ctypes.memmove(ptr, text_bytes, len(text_bytes))
-                        kernel32.GlobalUnlock(h_mem)
-                        user32.SetClipboardData(CF_UNICODETEXT, h_mem)
-                user32.CloseClipboard()
-                return True
-            time.sleep(0.01)
+        user, kernel = _clipboard_apis()
+        owner = kernel.GetConsoleWindow()
+        if not owner:
+            raise OSError("No native clipboard owner window; use PowerShell fallback")
+        raw = (text + "\0").encode("utf-16le")
+        memory = kernel.GlobalAlloc(0x0042, len(raw))
+        if memory:
+            pointer = kernel.GlobalLock(memory)
+            if pointer:
+                try:
+                    ctypes.memmove(pointer, raw, len(raw))
+                finally:
+                    kernel.GlobalUnlock(memory)
+                for _ in range(5):
+                    if user.OpenClipboard(owner):
+                        try:
+                            if user.EmptyClipboard() and user.SetClipboardData(13, memory):
+                                transferred = True
+                                return True
+                        finally:
+                            user.CloseClipboard()
+                        break
+                    time.sleep(0.01)
     except Exception:
         pass
+    finally:
+        if memory and not transferred and kernel is not None:
+            try:
+                kernel.GlobalFree(memory)
+            except Exception:
+                pass
 
     try:
-        subprocess.run(["powershell", "-NoProfile", "-Command", f"Set-Clipboard -Value '{text}'"], capture_output=True, timeout=2)
-        return True
+        result = subprocess.run(["powershell", "-NoProfile", "-Command", "Set-Clipboard -Value " + _ps_literal(text)], capture_output=True, timeout=2)
+        return result.returncode == 0
     except Exception:
-        pass
-    return False
+        return False
+
 
 def get_clipboard():
-    """Lay text tu clipboard bang Windows API, fallback PowerShell neu loi."""
+    """Read Unicode text, always releasing both the global lock and clipboard."""
     try:
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-        user32.GetClipboardData.restype = ctypes.c_void_p
-        user32.GetClipboardData.argtypes = [ctypes.c_uint]
-        kernel32.GlobalLock.restype = ctypes.c_void_p
-        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
-        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
-        CF_UNICODETEXT = 13
-
+        user, kernel = _clipboard_apis()
         for _ in range(5):
-            if user32.OpenClipboard(None):
-                h = user32.GetClipboardData(CF_UNICODETEXT)
-                val = None
-                if h:
-                    p = kernel32.GlobalLock(h)
-                    if p:
-                        val = ctypes.wstring_at(p)
-                        kernel32.GlobalUnlock(h)
-                user32.CloseClipboard()
-                if val is not None:
-                    return val
+            if user.OpenClipboard(None):
+                try:
+                    handle = user.GetClipboardData(13)
+                    if handle:
+                        pointer = kernel.GlobalLock(handle)
+                        if pointer:
+                            try:
+                                return ctypes.wstring_at(pointer)
+                            finally:
+                                kernel.GlobalUnlock(handle)
+                finally:
+                    user.CloseClipboard()
             time.sleep(0.01)
     except Exception:
         pass
-
     try:
-        res = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Clipboard"], capture_output=True, text=True, timeout=2)
-        if res.stdout:
-            return res.stdout.strip()
+        result = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Clipboard"], capture_output=True, text=True, timeout=2)
+        if result.returncode == 0 and result.stdout:
+            return result.stdout.rstrip("\r\n")
     except Exception:
         pass
     return ""
 
+def _owned_uia_context(timeout):
+    """Wait briefly for our newly launched window, never adopt a foreign one."""
+    deadline = time.monotonic() + max(0, timeout)
+    while True:
+        if find_unmanaged_odx_window():
+            return None
+        hwnd = find_odx_window()
+        if hwnd and is_managed_odx_window(hwnd):
+            pid, path = _window_process_path(hwnd)
+            # Resolve again after checking ownership to catch a replaced window.
+            if _is_selected_odx_path(path) and _runtime.owns_pid(pid):
+                return int(hwnd), pid
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.05)
+
+
+def _uia_script_prefix(hwnd, pid):
+    """Definitions referenced by the static templates, before user text is added.
+
+    Only the captured main HWND is used. Desktop popup searches are constrained
+    to its PID; no title-only selection or process-name fallback is permitted.
+    """
+    return """$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$script:OdxTargetPid = __ODX_PID__
+$script:OdxTargetHwnd = [IntPtr][Int64]__ODX_HWND__
+$script:OdxProcessCondition = [System.Windows.Automation.PropertyCondition]::new(
+    [System.Windows.Automation.AutomationElement]::ProcessIdProperty, [int]$script:OdxTargetPid)
+function Get-OwnedOdxMainWindow {
+    try {
+        $owned = [System.Windows.Automation.AutomationElement]::FromHandle($script:OdxTargetHwnd)
+        if ($owned -and $owned.Current.ProcessId -eq $script:OdxTargetPid -and
+            $owned.Current.Name -ceq 'Odx Capture') {
+            return $owned
+        }
+    } catch { }
+    return $null
+}
+if (-not (Get-OwnedOdxMainWindow)) {
+    Write-Output 'ODX_WINDOW_NOT_OWNED'
+    exit 1
+}
+""".replace("__ODX_PID__", str(int(pid))).replace("__ODX_HWND__", str(int(hwnd)))
+
+
 def run_ps_script(ps_code, timeout=5):
-    """Thuc thi PowerShell an toan 100% qua Base64 EncodedCommand (tranh loi parse stdin hoac dau ngoac)."""
+    """Run scoped UI automation as a managed child, with bounded lifetime."""
+    process = None
     try:
-        encoded = base64.b64encode(ps_code.encode("utf-16le")).decode("ascii")
-        return subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
-            capture_output=True, text=True, timeout=timeout
-        )
+        deadline = time.monotonic() + timeout
+        context = _owned_uia_context(timeout)
+        if context is None:
+            return None
+        code = _uia_script_prefix(*context) + ps_code
+        # Keep the command line short: native accessibility definitions can
+        # exceed Windows' 32K command-line limit once base64 encoded.
+        bootstrap = ("[Console]::InputEncoding=[Text.UTF8Encoding]::new($false); "
+                     "$source=[Console]::In.ReadToEnd().TrimStart([char]0xFEFF); "
+                     "& ([ScriptBlock]::Create($source))")
+        encoded = base64.b64encode(bootstrap.encode("utf-16le")).decode("ascii")
+        command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded]
+        process = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            encoding="utf-8-sig", errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        register_managed_process(process)
+        stdout, stderr = process.communicate(input=code, timeout=max(0.01, deadline - time.monotonic()))
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     except Exception:
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=2)
+            except (OSError, subprocess.SubprocessError):
+                pass
         return None
 
-def is_task_already_recorded(task_id):
+
+# These choices belong to the exact Odx window that this tool configured. Never
+# carry a restore request into a different native process/window.
+_capture_test_mode_lock = threading.Lock()
+_capture_test_snapshots = {}
+_desktop_source_names = ("Màn hình chính", "Primary monitor")
+_raw_profile_names = ("Không có (chỉ giữ dữ liệu thô)", "None (keep raw capture only)")
+
+
+def _capture_test_config_paths():
+    native = os.path.expandvars(r"%APPDATA%\Odx\odx-app.json")
+    snapshot = os.path.join(TOOL_DIR, "odx_capture_test_restore.json")
+    identity = hashlib.sha256((os.path.normcase(os.path.abspath(native)) + "\0" +
+                               os.environ.get("COMPUTERNAME", "")).encode("utf-8")).hexdigest()
+    return native, snapshot, identity
+
+
+def _write_capture_test_json(path, value):
+    """Replace one JSON file atomically; never store the native config backup."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory,
+                                         prefix=".odx-capture-test-", suffix=".tmp", delete=False) as stream:
+            temporary = stream.name
+            json.dump(value, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def prepare_capture_mode_launch(enabled):
+    """Prepare exactly two native capture settings before launching owned Odx.
+
+    Returns ``(success, error)``. The small restore file contains only the prior
+    WindowProcess/GameProfile fields and a machine identity, never credentials.
+    A normal launch restores only fields still set to TEST's null value, keeping
+    any later native/user changes. Restoration survives tool/native restarts.
     """
-    Kiem tra xem task_id nay da tung duoc quay va co du lieu tren may chua.
-    Kiem tra ca trong data/captures cua Odx va cac thu muc captures lan can, khong phan biet hoa thuong.
+    with _capture_test_mode_lock:
+        try:
+            native_path, snapshot_path, identity = _capture_test_config_paths()
+            snapshot = None
+            if os.path.exists(snapshot_path):
+                with open(snapshot_path, encoding="utf-8") as stream:
+                    candidate = json.load(stream)
+                if (not isinstance(candidate, dict) or candidate.get("version") != 1 or
+                        not isinstance(candidate.get("identity"), str) or not isinstance(candidate.get("original"), dict) or
+                        any(key not in ("WindowProcess", "GameProfile") or (value is not None and not isinstance(value, str))
+                            for key, value in candidate["original"].items())):
+                    raise ValueError("Invalid capture restore metadata")
+                if candidate["identity"] == identity:
+                    snapshot = candidate
+            if not enabled and snapshot is None:
+                return True, ""
+            # A running Odx can overwrite these persisted settings on close.
+            # This API deliberately cannot change any live room or recorder.
+            if find_odx_window() or find_unmanaged_odx_window():
+                return False, "Hãy đóng Odx do tool mở trước khi chuẩn bị cấu hình quay."
+            config = {}
+            if os.path.exists(native_path):
+                with open(native_path, encoding="utf-8-sig") as stream:
+                    config = json.load(stream)
+            if not isinstance(config, dict):
+                raise ValueError("Invalid native config")
+            keys = ("WindowProcess", "GameProfile")
+            if any(config.get(key) is not None and not isinstance(config[key], str) for key in keys):
+                raise ValueError("Invalid capture settings")
+            if enabled:
+                original = dict(snapshot["original"]) if snapshot is not None else {}
+                for key in keys:
+                    if snapshot is None or config.get(key) is not None:
+                        if key in config:
+                            original[key] = config[key]
+                        else:
+                            original.pop(key, None)
+                # Write the two-field backup before modifying the native file.
+                _write_capture_test_json(snapshot_path, {"version": 1, "identity": identity, "original": original})
+                for key in keys:
+                    config[key] = None
+                _write_capture_test_json(native_path, config)
+            else:
+                for key in keys:
+                    if key in config and config[key] is None:
+                        if key in snapshot["original"]:
+                            config[key] = snapshot["original"][key]
+                        else:
+                            config.pop(key, None)
+                _write_capture_test_json(native_path, config)
+                os.unlink(snapshot_path)
+                _capture_test_snapshots.clear()
+            return True, ""
+        except (OSError, ValueError, TypeError):
+            # Do not include native config contents or credentials in errors.
+            return False, "Không đọc/ghi được cấu hình quay test hoặc bản khôi phục; chưa mở Odx."
+
+
+def _capture_test_selection_script(context, action, original=None, applied=None, expected=None):
+    """Configure startup selectors through UIA, without clicks or key input.
+
+    Native LoadSources/LoadGames put the null-process/null-profile items first;
+    their exact VI/EN labels identify those choices without depending on the
+    user's installed game profiles or their order.
     """
-    if not task_id:
-        return False, ""
-    
-    clean_id = str(task_id).strip().lower()
-    parent_dirs = [
+    payload = {
+        "hwnd": int(context[0]), "pid": int(context[1]), "action": action,
+        "original": original, "applied": applied, "expected": expected,
+        "source_labels": _desktop_source_names, "game_labels": _raw_profile_names,
+    }
+    encoded = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("ascii")
+    return r"""
+$request = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__REQUEST__')) | ConvertFrom-Json
+if ($script:OdxTargetHwnd.ToInt64() -ne [Int64]$request.hwnd -or
+    $script:OdxTargetPid -ne [int]$request.pid) { throw 'ODX_WINDOW_CHANGED' }
+$win = Get-OwnedOdxMainWindow
+if (-not $win) { throw 'ODX_WINDOW_NOT_OWNED' }
+function Get-CaptureCombo([string]$id) {
+    $condition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, $id)
+    try { $box = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition) }
+    catch { throw 'CAPTURE_UI_LOADING' }
+    if (-not $box -or $box.Current.ControlType -ne [System.Windows.Automation.ControlType]::ComboBox) {
+        throw "CAPTURE_COMBO_MISSING: $id"
+    }
+    return $box
+}
+function Get-CaptureChoice($box) {
+    try { $selected = @($box.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern).Current.GetSelection()) }
+    catch { throw 'CAPTURE_UI_LOADING' }
+    if ($selected.Count -ne 1 -or -not $selected[0].Current.Name) { throw 'CAPTURE_SELECTION_UNKNOWN' }
+    return [string]$selected[0].Current.Name
+}
+function Find-CaptureChoice($box, [string]$name) {
+    $condition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::NameProperty, $name)
+    $matches = @($box.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition) |
+        Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::ListItem })
+    # ItemContainerPattern also identifies virtualized, collapsed items.
+    if ($matches.Count -eq 0) {
+        try {
+            $container = $box.GetCurrentPattern([System.Windows.Automation.ItemContainerPattern]::Pattern)
+            $item = $container.FindItemByProperty($null,
+                [System.Windows.Automation.AutomationElement]::NameProperty, $name)
+            if ($item) {
+                $matches = @($item)
+                $next = $container.FindItemByProperty($item,
+                    [System.Windows.Automation.AutomationElement]::NameProperty, $name)
+                if ($next) { $matches += $next }
+            }
+        } catch { }
+    }
+    if ($matches.Count -eq 0) { throw 'CAPTURE_TEST_CHOICES_UNAVAILABLE' }
+    if ($matches.Count -ne 1) { throw 'CAPTURE_CHOICE_NOT_UNIQUE' }
+    return $matches[0]
+}
+function Set-CaptureChoice($box, $item, [string]$name) {
+    if ((Get-CaptureChoice $box) -ceq $name) { return }
+    if (-not $box.Current.IsEnabled) { throw 'CAPTURE_COMBO_DISABLED' }
+    $expand = $box.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
+    $wasCollapsed = $expand.Current.ExpandCollapseState -eq [System.Windows.Automation.ExpandCollapseState]::Collapsed
+    try {
+        try {
+            $item.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+        } catch {
+            # Collapsed WPF ComboBox items are virtualized. Realize supplies
+            # their native item provider; WPF may briefly open the dropdown.
+            $item.GetCurrentPattern([System.Windows.Automation.VirtualizedItemPattern]::Pattern).Realize()
+            $item = Find-CaptureChoice $box $name
+            $item.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+        }
+        for ($attempt=0; $attempt -lt 15; $attempt++) {
+            if ((Get-CaptureChoice $box) -ceq $name) { return }
+            Start-Sleep -Milliseconds 40
+        }
+        throw "CAPTURE_READBACK_FAILED: $name"
+    } finally {
+        if ($wasCollapsed -and $expand.Current.ExpandCollapseState -ne [System.Windows.Automation.ExpandCollapseState]::Collapsed) {
+            $expand.Collapse()
+        }
+    }
+}
+function Write-CaptureResult($result) {
+    $result.hwnd = $script:OdxTargetHwnd.ToInt64()
+    $result.pid = $script:OdxTargetPid
+    Write-Output ('CAPTURE_TEST_RESULT:' + ($result | ConvertTo-Json -Compress -Depth 5))
+}
+trap {
+    $reason = 'CAPTURE_UI_ERROR'
+    if ($_.Exception.Message -match '\b(CAPTURE_[A-Z_]+|ODX_WINDOW_[A-Z_]+)\b') { $reason=$Matches[1] }
+    Write-CaptureResult @{success=$false;error=$reason}
+    exit 1
+}
+$sourceBox = Get-CaptureCombo 'SourceBox'
+$gameBox = Get-CaptureCombo 'GameBox'
+$before = @{source=(Get-CaptureChoice $sourceBox); game=(Get-CaptureChoice $gameBox)}
+if ($request.action -ceq 'inspect') {
+    $sourceTarget = $null; $gameTarget = $null
+    foreach ($name in $request.source_labels) {
+        try { $null = Find-CaptureChoice $sourceBox $name; $sourceTarget=$name; break }
+        catch { if ($_.Exception.Message -notmatch 'CAPTURE_TEST_CHOICES_UNAVAILABLE') { throw } }
+    }
+    foreach ($name in $request.game_labels) {
+        try { $null = Find-CaptureChoice $gameBox $name; $gameTarget=$name; break }
+        catch { if ($_.Exception.Message -notmatch 'CAPTURE_TEST_CHOICES_UNAVAILABLE') { throw } }
+    }
+    if (-not $sourceTarget -or -not $gameTarget) { throw 'CAPTURE_TEST_CHOICES_UNAVAILABLE' }
+    Write-CaptureResult @{success=$true; selection=$before; target=@{source=$sourceTarget;game=$gameTarget}}
+    exit 0
+}
+if ($request.action -ceq 'restore') {
+    $sourceName = if ($before.source -ceq $request.applied.source) {$request.original.source} else {$before.source}
+    $gameName = if ($before.game -ceq $request.applied.game) {$request.original.game} else {$before.game}
+    $preserved = $before.source -cne $request.applied.source -or $before.game -cne $request.applied.game
+} elseif ($request.action -ceq 'apply') {
+    if ($before.source -cne $request.expected.source -or $before.game -cne $request.expected.game) {
+        throw 'CAPTURE_SELECTION_CHANGED'
+    }
+    $sourceName=$request.applied.source; $gameName=$request.applied.game; $preserved=$false
+} else { throw 'CAPTURE_ACTION_INVALID' }
+if ($sourceName -ceq $before.source -and $gameName -ceq $before.game) {
+    Write-CaptureResult @{success=$true;selection=$before;changed=$false;preserved=$preserved}
+    exit 0
+}
+# Resolve every choice, including rollback items, before changing either box.
+$sourceItem = Find-CaptureChoice $sourceBox $sourceName
+$gameItem = Find-CaptureChoice $gameBox $gameName
+$oldSourceItem = Find-CaptureChoice $sourceBox $before.source
+$oldGameItem = Find-CaptureChoice $gameBox $before.game
+try {
+    # Selecting a game can automatically change SourceBox. Apply source last.
+    Set-CaptureChoice $gameBox $gameItem $gameName
+    Set-CaptureChoice $sourceBox $sourceItem $sourceName
+    $actual = @{source=(Get-CaptureChoice $sourceBox);game=(Get-CaptureChoice $gameBox)}
+    if ($actual.source -cne $sourceName -or $actual.game -cne $gameName) { throw 'CAPTURE_READBACK_FAILED' }
+    Write-CaptureResult @{success=$true;selection=$actual;changed=$true;preserved=$preserved}
+    exit 0
+} catch {
+    $failure = $_.Exception.Message
+    $rolledBack = $false
+    try {
+        Set-CaptureChoice $gameBox $oldGameItem $before.game
+        Set-CaptureChoice $sourceBox $oldSourceItem $before.source
+        $rolledBack = ((Get-CaptureChoice $sourceBox) -ceq $before.source -and
+                       (Get-CaptureChoice $gameBox) -ceq $before.game)
+    } catch { }
+    Write-CaptureResult @{success=$false;error=$failure;rolled_back=$rolledBack}
+    exit 1
+}
+""".replace("__REQUEST__", encoded)
+
+
+class _CaptureConfigurationError(RuntimeError):
+    """A bounded, safe UIA reason; never forward raw PowerShell stderr."""
+    _loading = frozenset(("CAPTURE_COMBO_MISSING", "CAPTURE_SELECTION_UNKNOWN",
+                          "CAPTURE_TEST_CHOICES_UNAVAILABLE", "CAPTURE_UI_LOADING", "CAPTURE_UI_TIMEOUT"))
+    _messages = {
+        "CAPTURE_COMBO_MISSING": "Odx đang tải bộ chọn nguồn quay hoặc hồ sơ game.",
+        "CAPTURE_SELECTION_UNKNOWN": "Odx chưa tải xong lựa chọn nguồn quay và hồ sơ game.",
+        "CAPTURE_TEST_CHOICES_UNAVAILABLE": "Odx chưa tải xong danh sách nguồn quay và hồ sơ game.",
+        "CAPTURE_UI_LOADING": "Giao diện Odx đang khởi tạo.",
+        "CAPTURE_UI_TIMEOUT": "Giao diện Odx chưa phản hồi trong thời gian chờ.",
+        "CAPTURE_CHOICE_NOT_UNIQUE": "Nhãn nguồn quay hoặc hồ sơ game bị trùng; chưa thay đổi cấu hình.",
+        "CAPTURE_COMBO_DISABLED": "Odx đang khóa bộ chọn nguồn quay; hãy kết thúc phiên trước khi đổi chế độ.",
+        "CAPTURE_SELECTION_CHANGED": "Lựa chọn nguồn quay thay đổi trong lúc chuẩn bị; chưa tạo phòng.",
+        "CAPTURE_READBACK_FAILED": "Odx chưa xác nhận nguồn quay vừa chọn.",
+        "CAPTURE_ACTION_INVALID": "Yêu cầu cấu hình nguồn quay không hợp lệ.",
+        "ODX_WINDOW_CHANGED": "Cửa sổ Odx đã thay đổi; chưa áp dụng chế độ test.",
+        "ODX_WINDOW_NOT_OWNED": "Không truy cập được đúng cửa sổ Odx do tool mở.",
+        "CAPTURE_RESPONSE_MISSING": "Odx chưa trả xác nhận cấu hình nguồn quay.",
+        "CAPTURE_RESPONSE_INVALID": "Xác nhận cấu hình nguồn quay của Odx không hợp lệ.",
+        "CAPTURE_UI_ERROR": "Không đọc được cấu hình nguồn quay trên giao diện Odx.",
+    }
+
+    def __init__(self, code):
+        self.code = code if code in self._messages else "CAPTURE_UI_ERROR"
+        self.retryable = self.code in self._loading
+        super().__init__(f"{self._messages[self.code]} [{self.code}]")
+
+
+def _capture_test_result(context, action, timeout, **kwargs):
+    result = run_ps_script(_capture_test_selection_script(context, action, **kwargs), timeout=timeout)
+    if result is None:
+        raise _CaptureConfigurationError("CAPTURE_UI_TIMEOUT")
+    for line in (result.stdout or "").splitlines():
+        if not line.startswith("CAPTURE_TEST_RESULT:"):
+            continue
+        try:
+            data = json.loads(line.partition(":")[2])
+        except (TypeError, ValueError):
+            raise _CaptureConfigurationError("CAPTURE_RESPONSE_INVALID") from None
+        if not isinstance(data, dict):
+            raise _CaptureConfigurationError("CAPTURE_RESPONSE_INVALID")
+        if data.get("hwnd") != context[0] or data.get("pid") != context[1]:
+            raise _CaptureConfigurationError("ODX_WINDOW_CHANGED")
+        if result.returncode != 0 or data.get("success") is not True:
+            reason = re.search(r"\b(CAPTURE_[A-Z_]+|ODX_WINDOW_[A-Z_]+)\b", str(data.get("error") or ""))
+            raise _CaptureConfigurationError(reason[0] if reason else "CAPTURE_UI_ERROR")
+        return data
+    # Prefix ownership checks and older providers can fail before the JSON
+    # trap. Report only recognized codes, never arbitrary stderr or UI values.
+    reason = re.search(r"\b(CAPTURE_[A-Z_]+|ODX_WINDOW_[A-Z_]+)\b",
+                       (result.stdout or "") + "\n" + (result.stderr or ""))
+    raise _CaptureConfigurationError(reason[0] if reason else "CAPTURE_RESPONSE_MISSING")
+
+
+def set_capture_test_mode(enabled, timeout=12, cancel_event=None, on_status=None):
+    """Configure owned Odx for desktop tests, or restore this session's choices.
+
+    The worker's ``success`` is true only after exact native UI readback. A
+    normal-mode call with no test snapshot never changes the user's Odx choices.
+    """
+    def configure():
+        with _capture_test_mode_lock:
+            try:
+                def current():
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RuntimeError("Đã hủy chuẩn bị nguồn quay Odx.")
+
+                current()
+                if not enabled and not _capture_test_snapshots:
+                    worker.success = True
+                    worker.status = "unchanged"
+                    return
+                deadline = time.monotonic() + max(1, float(timeout))
+                context = _owned_uia_context(min(1, max(0, float(timeout))))
+                if context is None:
+                    raise RuntimeError("Hãy mở Odx bằng tool trước khi cấu hình test màn hình.")
+                context = tuple(context)
+                # Old windows cannot be restored through a new HWND/PID.
+                for old in list(_capture_test_snapshots):
+                    if old != context:
+                        del _capture_test_snapshots[old]
+                snapshot = _capture_test_snapshots.get(context)
+
+                def request(action, **kwargs):
+                    current()
+                    if _owned_uia_context(0) != context:
+                        raise _CaptureConfigurationError("ODX_WINDOW_CHANGED")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError("Hết thời gian xác nhận cấu hình Odx.")
+                    return _capture_test_result(context, action, min(3, remaining), **kwargs)
+
+                if enabled:
+                    state, stable, last_error, announced = None, None, None, False
+                    while time.monotonic() < deadline:
+                        current()
+                        try:
+                            state = request("inspect")
+                            signature = (state.get("selection"), state.get("target"))
+                            if signature == stable:
+                                break
+                            stable = signature
+                        except _CaptureConfigurationError as exc:
+                            if not exc.retryable:
+                                raise
+                            stable, state, last_error = None, None, exc
+                        if not announced and on_status is not None:
+                            on_status("Đang chờ Odx tải xong nguồn quay và hồ sơ game...", "WAIT")
+                            announced = True
+                        delay = min(.2, max(0, deadline - time.monotonic()))
+                        if cancel_event is not None:
+                            cancel_event.wait(delay)
+                        else:
+                            time.sleep(delay)
+                    else:
+                        detail = f" {last_error}" if last_error else ""
+                        raise RuntimeError("Hết thời gian chờ Odx tải xong nguồn quay và hồ sơ game." + detail)
+                    current()
+                    before, applied = state.get("selection"), state.get("target")
+                    if (not isinstance(before, dict) or not isinstance(applied, dict) or
+                            not all(isinstance(before.get(key), str) and before[key] for key in ("source", "game")) or
+                            applied.get("source") not in _desktop_source_names or applied.get("game") not in _raw_profile_names):
+                        raise RuntimeError("Nguồn quay test của Odx không được nhận diện chính xác.")
+                    if snapshot is None and before != applied:
+                        snapshot = {"original": dict(before), "applied": dict(applied)}
+                        # Retain the original before any mutation, even if the
+                        # PowerShell child times out during a partial change.
+                        _capture_test_snapshots[context] = snapshot
+                    result = request("apply", applied=applied, expected=before)
+                    if result.get("selection") != applied:
+                        raise RuntimeError("Odx chưa chọn đúng màn hình chính và hồ sơ thô.")
+                    if snapshot is not None:
+                        snapshot["applied"] = dict(applied)
+                    worker.changed = bool(result.get("changed"))
+                    worker.status = "configured"
+                elif snapshot is not None:
+                    result = request("restore", original=snapshot["original"], applied=snapshot["applied"])
+                    worker.changed = bool(result.get("changed"))
+                    worker.restored = worker.changed
+                    worker.preserved_user_choice = bool(result.get("preserved"))
+                    del _capture_test_snapshots[context]
+                    worker.status = "restored" if worker.restored else "unchanged"
+                else:
+                    worker.status = "unchanged"
+                worker.success = True
+            except Exception as exc:
+                worker.error = str(exc)
+                worker.status = "failed"
+
+    worker = threading.Thread(target=configure, daemon=True)
+    worker.success = False
+    worker.error = ""
+    worker.status = "pending"
+    worker.changed = False
+    worker.restored = False
+    worker.preserved_user_choice = False
+    worker.start()
+    return worker
+
+
+def configure_desktop_test_capture(timeout=12):
+    """Compatibility helper for callers enabling the desktop test source."""
+    return set_capture_test_mode(True, timeout=timeout)
+
+def _task_capture_roots():
+    return [
         os.path.join(ODX_ROOT, "data", "captures"),
         os.path.join(os.path.dirname(ODX_ROOT), "captures"),
         os.path.join(ODX_ROOT, "captures"),
     ]
-    for p in parent_dirs:
-        if os.path.isdir(p):
-            try:
-                for entry in os.listdir(p):
-                    entry_path = os.path.join(p, entry)
-                    if os.path.isdir(entry_path):
-                        low_entry = entry.lower()
-                        # Khop chinh xac ten task hoac task bi cancelled (ke ca chu hoa hay chu thuong)
-                        if low_entry == clean_id or low_entry.startswith(clean_id + ".cancelled"):
-                            try:
-                                files = os.listdir(entry_path)
-                                if files:
-                                    return True, entry_path
-                            except Exception:
-                                return True, entry_path
-            except Exception:
-                pass
+
+
+def _task_capture_entries(parent):
+    """Return a snapshot, or None if this root cannot be inspected safely."""
+    try:
+        with os.scandir(parent) as entries:
+            return [(entry.name, entry.path) for entry in entries]
+    except FileNotFoundError:
+        # A broken link is an obstruction, not a safe missing capture root.
+        return None if os.path.lexists(parent) else []
+    except OSError:
+        return None
+
+
+def is_task_already_recorded(task_id):
+    """Reserve existing task names, including empty folders and cancelled takes.
+
+    A failed directory inspection also blocks capture, rather than treating an
+    unknown result as permission to overwrite. This function never changes data.
+    """
+    if not task_id:
+        return False, ""
+    clean_id = str(task_id).strip().lower()
+    if not re.fullmatch(r"[a-z0-9_-]{1,128}", clean_id):
+        return True, ""
+    for parent in _task_capture_roots():
+        entries = _task_capture_entries(parent)
+        if entries is None:
+            return True, parent
+        for name, path in entries:
+            low_name = name.lower()
+            if low_name == clean_id or low_name.startswith(clean_id + ".cancelled"):
+                return True, path
     return False, ""
 
 def get_next_available_fix_task_id(task_id):
-    """
-    Tu dong tim ma task fix ke tiep chua tung quay (vi du: task-fix1, task-fix2...).
-    """
-    clean_id = str(task_id).strip()
-    base_id = re.sub(r"-fix\d+$", "", clean_id)
-    counter = 1
-    while counter < 100:
+    """Find a genuinely unused FIX name; never return an unchecked fallback."""
+    clean_id = str(task_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", clean_id):
+        raise ValueError("Ma task khong hop le; chua the chon FIX.")
+    base_id = re.sub(r"-fix\d+$", "", clean_id, flags=re.IGNORECASE)
+    reserved = set()
+    for parent in _task_capture_roots():
+        entries = _task_capture_entries(parent)
+        if entries is None:
+            raise RuntimeError(f"Khong doc duoc thu muc captures; chua the chon FIX: {parent}")
+        for name, _ in entries:
+            low_name = name.lower()
+            reserved.add(low_name)
+            if ".cancelled" in low_name:
+                reserved.add(low_name.split(".cancelled", 1)[0])
+    for counter in range(1, 10001):
         candidate = f"{base_id}-fix{counter}"
-        exists, _ = is_task_already_recorded(candidate)
-        if not exists:
+        if len(candidate) > 128:
+            raise ValueError("Ma task qua dai de them hau to FIX (toi da 128 ky tu).")
+        if candidate.lower() not in reserved:
             return candidate
-        counter += 1
-    return f"{base_id}-fix{counter}"
+    raise RuntimeError("Khong con ma FIX trong 10000 lan thu; khong ghi de task cu.")
+
+_task_request_lock = threading.Lock()
+_task_injection_lock = threading.Lock()
+_task_request_generation = 0
+
 
 def set_task_box(task_id):
     """Cap nhat task_id vao file config, clipboard va tu dong dien vao TaskBox tren Odx Capture."""
+    global _task_request_generation
+    with _task_request_lock:
+        _task_request_generation += 1
+        generation = _task_request_generation
     # 1. Cap nhat file config odx-app.json
     appdata_json = os.path.expandvars(r"%APPDATA%\Odx\odx-app.json")
     try:
@@ -481,19 +997,20 @@ def set_task_box(task_id):
         Add-Type -AssemblyName UIAutomationClient
         Add-Type -AssemblyName UIAutomationTypes
         Add-Type -AssemblyName System.Windows.Forms
+        $taskValue = '__TASK_ID__'
 
         $root = [System.Windows.Automation.AutomationElement]::RootElement
         $win = $null
 
         $cName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, 'Odx Capture')
-        $win = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cName)
+        $win = Get-OwnedOdxMainWindow
 
         if (-not $win) {
-            $procs = Get-Process -Name 'odx-app', 'Odx Capture' -ErrorAction SilentlyContinue
+            $procs = Get-Process -Id $script:OdxTargetPid -ErrorAction SilentlyContinue
             foreach ($p in $procs) {
-                if ($p.MainWindowHandle -ne 0) {
+                if ($p.MainWindowHandle -eq $script:OdxTargetHwnd) {
                     try {
-                        $win = [System.Windows.Automation.AutomationElement]::FromHandle($p.MainWindowHandle)
+                        $win = (Get-OwnedOdxMainWindow)
                         if ($win) { break }
                     } catch {}
                 }
@@ -508,13 +1025,13 @@ def set_task_box(task_id):
                 try {
                     $vp = $elem.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
                     if ($vp) {
-                        $vp.SetValue('__TASK_ID__')
+                        $vp.SetValue($taskValue)
                         $setOk = $true
                     }
                 } catch {}
                 if (-not $setOk) {
                     try {
-                        [System.Windows.Forms.Clipboard]::SetText('__TASK_ID__')
+                        [System.Windows.Forms.Clipboard]::SetText($taskValue)
                         $elem.SetFocus()
                         Start-Sleep -Milliseconds 30
                         [System.Windows.Forms.SendKeys]::SendWait('^a')
@@ -522,15 +1039,39 @@ def set_task_box(task_id):
                         [System.Windows.Forms.SendKeys]::SendWait('^v')
                     } catch {}
                 }
-                exit 0
+                for ($attempt = 0; $attempt -lt 15; $attempt++) {
+                    try {
+                        $actual = $elem.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value
+                        if ($actual -ceq $taskValue) {
+                            Write-Output 'TASK_SET_OK'
+                            exit 0
+                        }
+                    } catch {}
+                    Start-Sleep -Milliseconds 50
+                }
+                exit 1
             }
         }
         exit 1
         """
-        ps_script = ps_template.replace("__TASK_ID__", str(task_id))
-        run_ps_script(ps_script, timeout=4)
+        ps_script = ps_template.replace("'__TASK_ID__'", _ps_literal(task_id))
+        result = run_ps_script(ps_script, timeout=5)
+        task_thread.success = bool(result is not None and result.returncode == 0 and "TASK_SET_OK" in (result.stdout or ""))
 
-    threading.Thread(target=_inject_uia, daemon=True).start()
+    def _run_latest():
+        with _task_injection_lock:
+            with _task_request_lock:
+                if generation != _task_request_generation:
+                    return
+            _inject_uia()
+            with _task_request_lock:
+                if generation != _task_request_generation:
+                    task_thread.success = False
+
+    task_thread = threading.Thread(target=_run_latest, daemon=True)
+    task_thread.success = False
+    task_thread.start()
+    return task_thread
 
 def set_player_info(player_id=None, player_name=None):
     """Cap nhat player_id va player_name vao file config odx-app.json va tu dong dien vao PlayerBox/NameBox tren Odx Capture."""
@@ -560,14 +1101,14 @@ def set_player_info(player_id=None, player_name=None):
         $win = $null
 
         $cName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, 'Odx Capture')
-        $win = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cName)
+        $win = Get-OwnedOdxMainWindow
 
         if (-not $win) {
-            $procs = Get-Process -Name 'odx-app', 'Odx Capture' -ErrorAction SilentlyContinue
+            $procs = Get-Process -Id $script:OdxTargetPid -ErrorAction SilentlyContinue
             foreach ($p in $procs) {
-                if ($p.MainWindowHandle -ne 0) {
+                if ($p.MainWindowHandle -eq $script:OdxTargetHwnd) {
                     try {
-                        $win = [System.Windows.Automation.AutomationElement]::FromHandle($p.MainWindowHandle)
+                        $win = (Get-OwnedOdxMainWindow)
                         if ($win) { break }
                     } catch {}
                 }
@@ -591,7 +1132,8 @@ def set_player_info(player_id=None, player_name=None):
                             Start-Sleep -Milliseconds 30
                             [System.Windows.Forms.SendKeys]::SendWait('^a')
                             Start-Sleep -Milliseconds 20
-                            [System.Windows.Forms.SendKeys]::SendWait($pidVal)
+                            [System.Windows.Forms.Clipboard]::SetText($pidVal)
+                        [System.Windows.Forms.SendKeys]::SendWait('^v')
                         } catch {}
                     }
                 }
@@ -610,7 +1152,8 @@ def set_player_info(player_id=None, player_name=None):
                             Start-Sleep -Milliseconds 30
                             [System.Windows.Forms.SendKeys]::SendWait('^a')
                             Start-Sleep -Milliseconds 20
-                            [System.Windows.Forms.SendKeys]::SendWait($pnameVal)
+                            [System.Windows.Forms.Clipboard]::SetText($pnameVal)
+                        [System.Windows.Forms.SendKeys]::SendWait('^v')
                         } catch {}
                     }
                 }
@@ -619,856 +1162,1012 @@ def set_player_info(player_id=None, player_name=None):
         """
         p_id_str = str(player_id) if player_id is not None else "NONE"
         p_name_str = str(player_name) if player_name is not None else "NONE"
-        ps_script = ps_template.replace("__PLAYER_ID__", p_id_str).replace("__PLAYER_NAME__", p_name_str)
+        ps_script = ps_template.replace("'__PLAYER_ID__'", _ps_literal(p_id_str)).replace("'__PLAYER_NAME__'", _ps_literal(p_name_str))
         run_ps_script(ps_script, timeout=4)
 
     threading.Thread(target=_inject_uia, daemon=True).start()
 
-def player_auto_join_and_ready(room_code, player_id, player_name, on_status=None):
-    """
-    Tu dong hoa 100% cho May Con (Player):
-      Buoc 1: Tim window, dien PlayerBox & NameBox, click [Vao room]
-      Buoc 2: Tim popup JoinRoomDialog, dien CodeBox, cho OkButton sang va click submit, doi hop thoai dong han
-      Buoc 3: Kiem tra xac thuc da vao phong thanh cong (JoinButton -> Roi room hoac RoomBox hien ma),
-              sau do tu dong bat San sang (StartStopButton -> San sang).
-              TUYET DOI khong tu dong gui F10 gay ghi hinh solo!
-    """
-    def _worker():
-        t_start = time.time()
-        log_event("JOIN_ROOM_START", level="INFO", source="PLAYER", data={
-            "room_code": room_code,
-            "player_id": player_id,
-            "player_name": player_name
-        })
-        if on_status:
-            on_status(f"MÁY CON: Đang tự động kết nối vào phòng [{room_code}]...", "PLAYER")
+def _player_join_script(room_code, player_id, player_name, action="inspect", context=None):
+    """Read or join through exact owned native controls, never screen input."""
+    payload = dict(room_code=str(room_code), player_id=str(player_id), player_name=str(player_name),
+                   action=action, hwnd=int(context[0]) if context else 0,
+                   pid=int(context[1]) if context else 0)
+    encoded = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("ascii")
+    return r"""
+$request = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__JOIN_REQUEST__')) | ConvertFrom-Json
+$result = @{status='waiting';room_code='';player_id='';invoked=$false;code_set=$false;error='';dialog_hwnd=0}
+function Write-JoinResult {
+    $result.hwnd=$script:OdxTargetHwnd.ToInt64(); $result.pid=$script:OdxTargetPid
+    Write-Output ('ODX_PLAYER_JOIN:' + ($result | ConvertTo-Json -Compress))
+}
+function Get-JoinControl($parent,[string]$id) {
+    $condition=[System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,$id)
+    $control=$parent.FindFirst([System.Windows.Automation.TreeScope]::Descendants,$condition)
+    if ($control -and $control.Current.ProcessId -eq $script:OdxTargetPid) { return $control }
+    return $null
+}
+function Get-JoinValue($control) {
+    if (-not $control) { return '' }
+    try { return [string]$control.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value }
+    catch { return [string]$control.Current.Name }
+}
+function Set-JoinValue($control,[string]$value) {
+    if (-not $control -or -not $control.Current.IsEnabled) { throw 'JOIN_FIELD_UNAVAILABLE' }
+    $pattern=$control.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+    if ($pattern.Current.IsReadOnly) { throw 'JOIN_FIELD_READ_ONLY' }
+    $pattern.SetValue($value)
+    if ((Get-JoinValue $control) -cne $value) { throw 'JOIN_FIELD_READBACK_FAILED' }
+}
+function Get-JoinLabel($control) {
+    if (-not $control) { return '' }
+    return ([string]$control.Current.Name).Replace('&','').Replace('_','').Trim().ToLowerInvariant()
+}
+try {
+    if (($request.hwnd -and $request.hwnd -ne $script:OdxTargetHwnd.ToInt64()) -or
+        ($request.pid -and $request.pid -ne $script:OdxTargetPid)) { throw 'JOIN_WINDOW_CHANGED' }
+    $win=Get-OwnedOdxMainWindow
+    if (-not $win) { throw 'JOIN_WINDOW_NOT_OWNED' }
+    $identity=Get-JoinControl $win 'PlayerBox'
+    $name=Get-JoinControl $win 'NameBox'
+    $join=Get-JoinControl $win 'JoinButton'
+    $room=Get-JoinControl $win 'RoomBox'
+    if (-not $identity -or -not $name -or -not $join) {
+        $result.error='JOIN_UI_LOADING'; Write-JoinResult; exit 0
+    }
+    $result.player_id=(Get-JoinValue $identity).Trim()
+    $result.room_code=(Get-JoinValue $room).Trim()
+    $label=Get-JoinLabel $join
+    if ($label -in @('rời room','rời phòng','leave room','leave')) {
+        if ($result.player_id -cne $request.player_id) { $result.status='wrong_player'; $result.error='JOIN_WRONG_PLAYER' }
+        elseif ($result.room_code -cne $request.room_code) { $result.status='wrong_room'; $result.error='JOIN_WRONG_ROOM' }
+        else { $result.status='in_room' }
+        Write-JoinResult; exit 0
+    }
+    if ($label -notin @('vào room','vào phòng','join room','join')) {
+        $result.error='JOIN_UI_LOADING'; Write-JoinResult; exit 0
+    }
+    if (-not ('OdxJoinOwner' -as [type])) {
+        Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class OdxJoinOwner { [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr h, uint command); }'
+    }
+    $root=[System.Windows.Automation.AutomationElement]::RootElement
+    $windows=@()
+    foreach ($candidate in $root.FindAll([System.Windows.Automation.TreeScope]::Children,$script:OdxProcessCondition)) {
+        $windows += $candidate
+    }
+    # WPF's owned ShowDialog window can be a descendant of its owner in UIA,
+    # although its HWND is a native top-level dialog. Search both placements.
+    $windowType=[System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Window)
+    $ownedWindowCondition=[System.Windows.Automation.AndCondition]::new($script:OdxProcessCondition,$windowType)
+    foreach ($candidate in $win.FindAll([System.Windows.Automation.TreeScope]::Descendants,$ownedWindowCondition)) {
+        $windows += $candidate
+    }
+    $seenDialogHandles=@{}
+    $dialogs=@()
+    foreach ($window in $windows) {
+        if ($window.Current.ProcessId -ne $script:OdxTargetPid) { continue }
+        $dialogHandle=[IntPtr]$window.Current.NativeWindowHandle
+        if ($dialogHandle -eq [IntPtr]::Zero -or
+            [OdxJoinOwner]::GetWindow($dialogHandle,4) -ne $script:OdxTargetHwnd) { continue }
+        if ($seenDialogHandles.ContainsKey($dialogHandle.ToInt64())) { continue }
+        $seenDialogHandles[$dialogHandle.ToInt64()]=$true
+        $code=Get-JoinControl $window 'CodeBox'
+        $ok=Get-JoinControl $window 'OkButton'
+        if ($code -and $ok -and $code.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit -and
+            $ok.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button) {
+            $dialogs += @{window=$window;code=$code;ok=$ok;hwnd=$dialogHandle.ToInt64()}
+        }
+    }
+    if ($dialogs.Count -gt 1) { throw 'JOIN_DIALOG_AMBIGUOUS' }
+    if ($dialogs.Count -eq 1) {
+        $dialog=$dialogs[0]; $result.dialog_hwnd=$dialog.hwnd
+        $result.status='dialog'
+        if ($request.action -ceq 'submit') {
+            if ($result.player_id -cne $request.player_id) { throw 'JOIN_PLAYER_CHANGED' }
+            Set-JoinValue $dialog.code $request.room_code
+            $result.code_set=$true
+            for ($attempt=0; $attempt -lt 20 -and -not $dialog.ok.Current.IsEnabled; $attempt++) {
+                Start-Sleep -Milliseconds 50
+            }
+            if (-not $dialog.ok.Current.IsEnabled) { $result.status='dialog_waiting'; $result.error='JOIN_SUBMIT_DISABLED' }
+            elseif ((Get-JoinValue $dialog.code) -cne $request.room_code) { throw 'JOIN_CODE_CHANGED' }
+            else {
+                $invoke=$dialog.ok.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+                $result.invoked=$true
+                $invoke.Invoke()
+                $result.status='submitted'
+            }
+        }
+        Write-JoinResult; exit 0
+    }
+    $result.status='can_open'
+    if (-not $join.Current.IsEnabled) { $result.status='waiting'; $result.error='JOIN_BUTTON_DISABLED' }
+    elseif ($request.action -ceq 'open') {
+        Set-JoinValue $identity $request.player_id
+        Set-JoinValue $name $request.player_name
+        if ((Get-JoinLabel $join) -notin @('vào room','vào phòng','join room','join') -or
+            -not $join.Current.IsEnabled) { throw 'JOIN_STATE_CHANGED' }
+        $invoke=$join.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+        $result.player_id=Get-JoinValue $identity
+        $result.invoked=$true
+        $invoke.Invoke()
+        $result.status='opened'
+    }
+} catch {
+    $result.status='error'
+    $result.error='JOIN_UI_UNAVAILABLE'
+    if ($_.Exception.Message -match '\bJOIN_[A-Z_]+\b') { $result.error=$Matches[0] }
+}
+Write-JoinResult
+""".replace("__JOIN_REQUEST__", encoded)
 
-        # 1. Cap nhat file config goc
-        appdata_json = os.path.expandvars(r"%APPDATA%\Odx\odx-app.json")
+
+def _player_join_report(result):
+    if result is None or result.returncode != 0:
+        return None
+    for line in reversed((result.stdout or "").splitlines()):
+        if not line.startswith("ODX_PLAYER_JOIN:"):
+            continue
         try:
-            cfg = {}
-            if os.path.exists(appdata_json):
-                with open(appdata_json, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-            cfg["PlayerId"] = str(player_id)
-            cfg["PlayerName"] = str(player_name)
-            os.makedirs(os.path.dirname(appdata_json), exist_ok=True)
-            with open(appdata_json, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, indent=2)
-        except Exception:
-            pass
+            report = json.loads(line.partition(":")[2])
+        except (TypeError, ValueError):
+            return None
+        if isinstance(report, dict) and report.get("status") in {
+                "waiting", "can_open", "opened", "dialog", "dialog_waiting", "submitted",
+                "in_room", "wrong_room", "wrong_player", "error"}:
+            return report
+    return None
 
-        # 2. Clipboard
-        set_clipboard(room_code)
 
-        # Kiem tra xem ma phong co thuc su ton tai tren may chu Odx khong
-        r_chk = fetch_room_status(room_code)
-        if isinstance(r_chk, dict) and r_chk.get("error") == "NOT_FOUND":
-            log_event("ROOM_NOT_FOUND_ON_SERVER", level="WARN", source="PLAYER", data={"room_code": room_code})
-            if on_status:
-                on_status(f"LỖI: Mã phòng [{room_code}] KHÔNG TỒN TẠI trên máy chủ Odx (Host chưa bấm tạo phòng hoặc bạn nhập sai mã)! Tool dừng để tránh kẹt.", "ERROR")
+_player_join_lock = threading.Lock()
+
+
+def player_auto_join_and_ready(room_code, player_id, player_name, on_status=None,
+                               cancel_event=None, can_ready=None, timeout=60):
+    """Join the exact native room, confirm server membership, then request Ready.
+
+    Joining never depends on the separate settings/Ready gate. Lost command
+    results never cause a repeated invoke, and failures keep Odx/dialogs open.
+    """
+    cancellation = cancel_event if cancel_event is not None else threading.Event()
+
+    def notify(message, tag="PLAYER"):
+        if on_status:
+            try:
+                on_status(message, tag)
+            except Exception:
+                pass
+
+    def finish(status, error="", success=False, joined=False):
+        worker.status, worker.error = status, str(error)
+        worker.success, worker.joined = bool(success), bool(joined)
+        if error:
+            notify(str(error), "ERROR")
+
+    def current():
+        return not cancellation.is_set()
+
+    def verify_api(data, identity):
+        if not isinstance(data, dict) or data.get("error") or not isinstance(data.get("members"), list):
+            return "unverified", "Chưa đọc được trạng thái phòng trên máy chủ Odx."
+        if str(data.get("host") or "").strip() == identity:
+            return "identity_conflict", f"Player ID [{identity}] trùng Host. Hãy dùng ID khác trên Player."
+        matches = [member for member in data["members"] if isinstance(member, dict)
+                   and str(member.get("player_id") or "").strip() == identity]
+        if len(matches) > 1:
+            return "identity_conflict", f"Player ID [{identity}] bị trùng trong phòng."
+        if matches and matches[0].get("problem"):
+            return "blocked", str(matches[0]["problem"])
+        return ("member" if matches else "absent"), ""
+
+    def run():
+        if not _player_join_lock.acquire(blocking=False):
+            finish("busy", "Một thao tác vào phòng đang chạy; không tạo kết nối trùng.")
             return
+        try:
+            target = str(room_code or "").strip().upper()
+            identity, name = str(player_id or "").strip(), str(player_name or "").strip()
+            if not re.fullmatch(r"[A-Z0-9]{6}", target, flags=re.ASCII):
+                finish("invalid_room", "Mã phòng phải gồm đúng 6 chữ/số ASCII.")
+                return
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", identity, flags=re.ASCII) or not name:
+                finish("invalid_player", "Player ID hoặc tên không hợp lệ.")
+                return
+            try:
+                seconds = float(timeout)
+                if not 0 < seconds <= 180:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                finish("error", "Thời gian chờ vào phòng không hợp lệ.")
+                return
+            if not current():
+                finish("cancelled")
+                return
+            deadline = time.monotonic() + seconds
+            data = fetch_room_status(target)
+            api_status, api_error = verify_api(data, identity)
+            if api_status in {"identity_conflict", "blocked", "unverified"}:
+                finish(api_status, api_error)
+                return
+            if data.get("current_session"):
+                finish("recording", "Phòng đang quay hoặc xử lý round; hãy chờ trước khi vào phòng.")
+                return
+            context = _owned_uia_context(min(2, max(.01, deadline - time.monotonic())))
+            if context is None:
+                finish("unavailable", "Chưa tìm thấy cửa sổ Odx do tool mở; giữ nguyên để thử lại.")
+                return
+            context = tuple(context)
+            worker.room_code, worker.player_id = target, identity
+            opened, submitted = False, False
+            last_error = "Đang chờ Odx xác nhận vào phòng."
+            announced_code = False
 
-        # ============================================================
-        # KIEM TRA XEM HOP THOAI "VAO ROOM" CO DANG MO SAN KHONG
-        # ============================================================
-        ps_check_dlg = """
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
-$root = [System.Windows.Automation.AutomationElement]::RootElement
-$allW = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
-for ($i = 0; $i -lt $allW.Count; $i++) {
-    $tw = $allW.Item($i)
+            def request(action):
+                if not current():
+                    return None
+                if _owned_uia_context(0) != context:
+                    raise RuntimeError("Cửa sổ Odx đã thay đổi; không thao tác lên phiên khác.")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                report = _player_join_report(run_ps_script(
+                    _player_join_script(target, identity, name, action, context=context),
+                    timeout=min(5, remaining)))
+                if report and (report.get("hwnd") != context[0] or report.get("pid") != context[1]):
+                    raise RuntimeError("Xác nhận cửa sổ Odx không đúng phiên đang kết nối.")
+                return report
+
+            notify(f"Đang kiểm tra Odx và vào phòng [{target}] bằng Player ID [{identity}]...")
+            while current() and time.monotonic() < deadline:
+                report = request("inspect")
+                if not current():
+                    break
+                if not report:
+                    last_error = "Chưa đọc được giao diện Odx; chưa bấm lại để tránh kết nối trùng."
+                elif report["status"] in {"wrong_room", "wrong_player"}:
+                    finish(report["status"], "Odx đang ở phòng hoặc Player ID khác; giữ nguyên cửa sổ để bạn kiểm tra.")
+                    return
+                elif report["status"] == "error":
+                    finish("error", "Không thao tác được giao diện vào phòng Odx: " + str(report.get("error") or "JOIN_UI_UNAVAILABLE"))
+                    return
+                elif report["status"] == "in_room":
+                    # The main room UI and a fresh server response must agree.
+                    data = fetch_room_status(target)
+                    api_status, api_error = verify_api(data, identity)
+                    if api_status in {"identity_conflict", "blocked"}:
+                        finish(api_status, api_error)
+                        return
+                    if api_status == "member":
+                        worker.joined = worker.success = True
+                        worker.status = "joined_waiting_ready"
+                        notify(f"Đã xác nhận Player [{identity}] vào đúng phòng [{target}].", "SUCCESS")
+                        break
+                    last_error = api_error or "Odx đã hiện phòng; đang chờ server xác nhận thành viên Player."
+                else:
+                    # An API identity already used by another native session is
+                    # never adopted merely because its name matches this config.
+                    data = fetch_room_status(target)
+                    api_status, api_error = verify_api(data, identity)
+                    if api_status in {"identity_conflict", "blocked"}:
+                        finish(api_status, api_error)
+                        return
+                    if api_status == "member":
+                        finish("identity_conflict", f"Player ID [{identity}] đã có trong phòng nhưng Odx này chưa vào phòng. Hãy dùng ID riêng.")
+                        return
+                    if report["status"] == "can_open" and not opened:
+                        opened = True  # Before dispatch, even if the reply is lost.
+                        response = request("open")
+                        if response and response["status"] == "error":
+                            finish("error", "Chưa mở được hộp thoại vào phòng: " + str(response.get("error") or "JOIN_UI_UNAVAILABLE"))
+                            return
+                        last_error = "Đã gửi một lệnh mở hộp thoại vào phòng; đang chờ Odx."
+                    elif report["status"] in {"dialog", "dialog_waiting"} and not submitted:
+                        submitted = True
+                        response = request("submit")
+                        if response and response.get("code_set") and not announced_code:
+                            notify(f"Đã đọc lại đúng mã [{target}] trong ô CodeBox của Odx; đang chờ xác nhận vào phòng.")
+                            announced_code = True
+                        if response and response["status"] == "dialog_waiting" and not response.get("invoked"):
+                            submitted = False  # Exact report proves no submit was sent.
+                        elif response and response["status"] == "error":
+                            finish("error", "Chưa điền/xác nhận được mã phòng: " + str(response.get("error") or "JOIN_UI_UNAVAILABLE"))
+                            return
+                        last_error = "Đã gửi mã phòng một lần; đang chờ Odx và máy chủ xác nhận."
+                cancellation.wait(min(.25, max(0, deadline - time.monotonic())))
+            if not current():
+                finish("cancelled")
+                return
+            if not worker.joined:
+                finish("timeout", "Chưa xác nhận vào phòng. " + last_error + " Odx và hộp thoại được giữ nguyên.")
+                return
+            # Do not make successful room entry depend on the GUI's settings ACK.
+            allowed = True
+            if can_ready is not None:
+                try:
+                    allowed = bool(can_ready())
+                except Exception:
+                    allowed = False
+            if not allowed:
+                notify("Đã vào phòng; chờ đồng bộ cấu hình trước khi bật Ready.", "WAIT")
+                return
+            ready = player_ensure_ready_in_room(target, on_status=on_status, player_id=identity,
+                                                cancel_event=cancellation, can_ready=can_ready,
+                                                timeout=min(20, max(1, seconds)))
+            ready.join()
+            if not current():
+                finish("cancelled")
+                return
+            worker.ready = bool(ready.success)
+            worker.invoked = bool(ready.invoked)
+            if worker.ready:
+                worker.status = "confirmed"
+            else:
+                worker.ready_error = str(ready.error or "")
+                notify("Đã vào phòng; chưa xác nhận Ready, sẽ thử lại khi cấu hình và phòng sẵn sàng.", "WAIT")
+        except Exception as exc:
+            finish("error", f"Chưa hoàn tất vào phòng: {exc}. Odx được giữ nguyên.")
+        finally:
+            _player_join_lock.release()
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.success, worker.joined, worker.ready, worker.invoked = False, False, False, False
+    worker.status, worker.error, worker.ready_error = "joining", "", ""
+    worker.room_code, worker.player_id = "", ""
+    worker.cancel_event = cancellation
+    worker.start()
+    return worker
+
+
+
+def _player_ready_script(room_code=None, player_id=None, allow_invoke=False):
+    """Read/invoke a semantic Ready action; visibility is never room identity."""
+    script = r"""
+$targetRoom = __READY_ROOM__
+$targetPlayer = __READY_PLAYER__
+$allowInvoke = __READY_INVOKE__
+$result = @{status='unavailable'; room_code=''; player_id=''; button_state='unknown'; invoked=$false; error=''}
+function Write-PlayerReadyResult {
+    Write-Output ('ODX_PLAYER_READY:' + ($result | ConvertTo-Json -Compress))
+}
+function Get-ReadyControl($window, $id) {
+    $condition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, $id)
+    $element = $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+    if ($element -and $element.Current.ProcessId -eq $script:OdxTargetPid) { return $element }
+    return $null
+}
+function Get-ReadyText($element) {
+    if (-not $element) { return '' }
     try {
-        $wnm = $tw.Current.Name
-        if ($wnm -like '*Vào room*' -or $wnm -like '*Join room*' -or $wnm -eq 'Vào room') {
-            Write-Output "DIALOG_ALREADY_OPEN"
-            exit 0
-        }
-    } catch {}
+        $pattern = $element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+        if ($pattern) { return ([string]$pattern.Current.Value).Trim() }
+    } catch { }
+    try { return ([string]$element.Current.Name).Trim() } catch { return '' }
 }
-exit 0
-"""
-        res_chk = run_ps_script(ps_check_dlg, timeout=4)
-        dlg_already_open = "DIALOG_ALREADY_OPEN" in (res_chk.stdout if res_chk else "")
-
-        if not dlg_already_open:
-            # ============================================================
-            # STEP A: Tim Odx window, focus JoinButton, mouse-click async
-            # ============================================================
-            ps_step_a = """
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class W32Click { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e); public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(2, 0, 0, 0, UIntPtr.Zero); System.Threading.Thread.Sleep(50); mouse_event(4, 0, 0, 0, UIntPtr.Zero); } }'
-
-$root = [System.Windows.Automation.AutomationElement]::RootElement
-$win = $null
-
-for ($w = 0; $w -lt 30; $w++) {
-    $cName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, 'Odx Capture')
-    $win = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cName)
-    if (-not $win) {
-        $procs = Get-Process -Name 'odx-app', 'Odx Capture' -ErrorAction SilentlyContinue
-        foreach ($p in $procs) {
-            if ($p.MainWindowHandle -ne 0) {
-                try {
-                    $win = [System.Windows.Automation.AutomationElement]::FromHandle($p.MainWindowHandle)
-                    if ($win) { break }
-                } catch {}
-            }
+function Normalize-ReadyLabel($text) {
+    $text = ([string]$text).Replace([char]0x2019, [char]0x27).Replace('&', '').Replace('_', '').Trim().ToLowerInvariant()
+    $text = [regex]::Replace($text, '\s*\([^)]*\)\s*$', '')
+    $buffer = New-Object System.Text.StringBuilder
+    foreach ($character in $text.Normalize([Text.NormalizationForm]::FormD).ToCharArray()) {
+        if ([Globalization.CharUnicodeInfo]::GetUnicodeCategory($character) -ne [Globalization.UnicodeCategory]::NonSpacingMark) {
+            [void]$buffer.Append($character)
         }
     }
-    if ($win) { break }
-    Start-Sleep -Milliseconds 500
+    return ([regex]::Replace($buffer.ToString().Replace('đ','d'), '\s+', ' ')).Trim()
 }
-
-if (-not $win) {
-    Write-Output "ERR_NO_WINDOW"
-    exit 1
+function Get-ReadyButtonState($text) {
+    $label = Normalize-ReadyLabel $text
+    if ($label -in @('huy san sang', 'bo san sang', 'unready', 'not ready', 'cancel ready', 'cancel readiness')) { return 'already_ready' }
+    if ($label -in @('san sang', 'toi san sang', 'ready', "i'm ready", 'im ready', 'i am ready', 'mark ready', 'set ready')) { return 'ready_action' }
+    if ($label -match '^(dang |dung ghi|dung quay|ket thuc round|end round|stop recording|stopping|recording|starting capture|countdown|saving|finishing|bat dau ghi sau)') { return 'recording' }
+    return 'unknown'
 }
-
-$odxHandle = $win.Current.NativeWindowHandle
-
-# Tu dong dien Player ID va Ten vao o nhap tren Odx Capture
-$pidVal = '__PLAYER_ID__'
-$pnameVal = '__PLAYER_NAME__'
 try {
-    if ($pidVal -ne 'NONE') {
-        $cP = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'PlayerBox')
-        $elemP = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cP)
-        if ($elemP) {
-            try {
-                $vpP = $elemP.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-                $vpP.SetValue($pidVal)
-            } catch {
-                try {
-                    $elemP.SetFocus()
-                    Start-Sleep -Milliseconds 30
-                    [System.Windows.Forms.SendKeys]::SendWait('^a')
-                    Start-Sleep -Milliseconds 20
-                    [System.Windows.Forms.SendKeys]::SendWait($pidVal)
-                } catch {}
-            }
-        }
-    }
-    if ($pnameVal -ne 'NONE') {
-        $cN = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'NameBox')
-        $elemN = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cN)
-        if ($elemN) {
-            try {
-                $vpN = $elemN.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-                $vpN.SetValue($pnameVal)
-            } catch {
-                try {
-                    $elemN.SetFocus()
-                    Start-Sleep -Milliseconds 30
-                    [System.Windows.Forms.SendKeys]::SendWait('^a')
-                    Start-Sleep -Milliseconds 20
-                    [System.Windows.Forms.SendKeys]::SendWait($pnameVal)
-                } catch {}
-            }
-        }
-    }
-} catch {}
-
-# Kiem tra xem may con da o san trong phong chua (tranh bam nham nut Roi room)
-$targetRoom = '__ROOM_CODE__'
-$alreadyInRoom = $false
-
-$cJoin = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'JoinButton')
-$btnJoin = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cJoin)
-if ($btnJoin) {
-    $jText = $btnJoin.Current.Name
-    if ($jText -like '*Rời*' -or $jText -like '*Leave*') {
-        $alreadyInRoom = $true
-    }
-}
-
-$cRoomBox = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'RoomBox')
-$elemRb = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cRoomBox)
-if ($elemRb -and -not $elemRb.Current.IsOffscreen) {
-    $rbVal = ""
-    try { $rbVal = $elemRb.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value } catch {}
-    if (-not $rbVal) { $rbVal = $elemRb.Current.Name }
-    if ($rbVal -and ($rbVal.Trim().ToUpper() -eq $targetRoom.Trim().ToUpper() -or $rbVal -like "*$targetRoom*")) {
-        $alreadyInRoom = $true
-    }
-}
-
-if ($alreadyInRoom) {
-    Write-Output "ALREADY_IN_ROOM"
-    exit 0
-}
-
-# Tim JoinButton voi co che cho toi da 15 giay (de WPF khoi tao xong cac nut)
-if (-not $btnJoin) {
-    $cBtnType = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
-    for ($j = 0; $j -lt 30; $j++) {
-        try {
-            $allBtns = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cBtnType)
-            for ($b = 0; $b -lt $allBtns.Count; $b++) {
-                $currB = $allBtns.Item($b)
-                $nm = $currB.Current.Name
-                $aid = $currB.Current.AutomationId
-                if ($nm -like '*room*' -or $nm -like '*join*' -or $nm -like '*Join*' -or $aid -eq 'JoinButton') {
-                    $btnJoin = $currB
-                    break
-                }
-            }
-        } catch {}
-        if ($btnJoin) { break }
-        Start-Sleep -Milliseconds 500
-    }
-}
-
-if ($btnJoin) {
-    $jText = $btnJoin.Current.Name
-    if ($jText -like '*Rời*' -or $jText -like '*Leave*') {
-        $alreadyInRoom = $true
-    }
-}
-
-if ($alreadyInRoom) {
-    Write-Output "ALREADY_IN_ROOM"
-    exit 0
-}
-
-if (-not $btnJoin) {
-    Write-Output "ERR_NO_JOINBUTTON"
-    exit 1
-}
-
-# Focus window truoc
-try {
-    $h = [IntPtr]$odxHandle
-    if ($h -ne [IntPtr]::Zero) { [W32Click]::SetForegroundWindow($h) }
-} catch {}
-Start-Sleep -Milliseconds 200
-
-# Click bang mouse_event vao giua BoundingRectangle cua JoinButton
-$rect = $btnJoin.Current.BoundingRectangle
-if ($rect.Width -gt 0 -and $rect.Height -gt 0) {
-    $cx = [int]($rect.X + $rect.Width / 2)
-    $cy = [int]($rect.Y + $rect.Height / 2)
-    Write-Output "CLICK_JOIN_AT=$cx,$cy"
-    [W32Click]::Click($cx, $cy)
-}
-
-# Du phong: Focus truc tiep va go Space
-try {
-    $btnJoin.SetFocus()
-    Start-Sleep -Milliseconds 50
-    [System.Windows.Forms.SendKeys]::SendWait(' ')
-} catch {}
-
-Start-Sleep -Milliseconds 300
-Write-Output "JOIN_CLICKED_OK"
-exit 0
-""".replace("__PLAYER_ID__", str(player_id) if player_id else "NONE").replace("__PLAYER_NAME__", str(player_name) if player_name else "NONE").replace("__ROOM_CODE__", str(room_code))
-            res_a = run_ps_script(ps_step_a, timeout=20)
-            out_a = res_a.stdout if res_a else ""
-            log_event("STEP_A_JOIN_CLICK", level="INFO", source="PLAYER", data={
-                "stdout": out_a.strip(),
-                "elapsed_ms": int((time.time() - t_start) * 1000)
-            })
-
-            if on_status:
-                on_status(f"MÁY CON: Đang tự động điền mã & kết nối [{room_code}]...", "PLAYER")
-
-            if "ERR_NO_WINDOW" in out_a:
-                if on_status:
-                    on_status("Chưa tìm thấy cửa sổ Odx Capture. Hãy chắc chắn Odx Capture đang chạy.", "WARN")
-                return
-            if "ERR_NO_JOINBUTTON" in out_a and "ALREADY_IN_ROOM" not in out_a:
-                if on_status:
-                    on_status("Không tìm thấy nút [Vào room] trên Odx Capture.", "WARN")
-                return
-        else:
-            out_a = "JOIN_CLICKED_OK"
-            if on_status:
-                on_status(f"Hộp thoại Vào room đã mở sẵn. Đang tự động điền mã [{room_code}]...", "PLAYER")
-
-        if "ALREADY_IN_ROOM" not in out_a:
-            time.sleep(0.3)
-            ps_step_b = """
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class W32Click { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e); public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(2, 0, 0, 0, UIntPtr.Zero); System.Threading.Thread.Sleep(50); mouse_event(4, 0, 0, 0, UIntPtr.Zero); } }'
-
-$root = [System.Windows.Automation.AutomationElement]::RootElement
-
-$dlg = $null
-$codeBox = $null
-$cCode = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'CodeBox')
-$cEdit = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
-
-# 1. Polling tim cua so hop thoai "Vao room" / JoinRoomDialog trong toi da 10 giay
-for ($k = 0; $k -lt 50; $k++) {
-    Start-Sleep -Milliseconds 200
-
-    $allW = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
-    for ($i = 0; $i -lt $allW.Count; $i++) {
-        $tw = $allW.Item($i)
-        try {
-            $wnm = $tw.Current.Name
-            if ($wnm -like '*Vào room*' -or $wnm -like '*Join room*' -or $wnm -eq 'Vào room') {
-                $cb = $tw.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cCode)
-                if (-not $cb) {
-                    $cb = $tw.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cEdit)
-                }
-                if ($cb) {
-                    $dlg = $tw
-                    $codeBox = $cb
-                    break
-                }
-            }
-        } catch {}
-    }
-    if ($dlg -and $codeBox) { break }
-
-    # Fallback: Tim bat ky cua so nao tren desktop co chua CodeBox
-    for ($i = 0; $i -lt $allW.Count; $i++) {
-        $tw = $allW.Item($i)
-        try {
-            $cb = $tw.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cCode)
-            if ($cb) {
-                $dlg = $tw
-                $codeBox = $cb
+    $win = Get-OwnedOdxMainWindow
+    if (-not $win) { throw 'Managed Odx window is not available.' }
+    $button = Get-ReadyControl $win 'StartStopButton'
+    if (-not $button) {
+        $condition = [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
+        $buttons = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
+        foreach ($candidate in $buttons) {
+            if ($candidate.Current.ProcessId -eq $script:OdxTargetPid -and
+                (Get-ReadyButtonState $candidate.Current.Name) -in @('ready_action', 'already_ready')) {
+                $button = $candidate
                 break
             }
-        } catch {}
-    }
-    if ($dlg -and $codeBox) { break }
-}
-
-if (-not $dlg -or -not $codeBox) {
-    Write-Output "ERR_DIALOG_NOT_FOUND"
-    exit 1
-}
-
-Write-Output "CODEBOX_FOUND"
-$dHwnd = [IntPtr]$dlg.Current.NativeWindowHandle
-
-# 2. Dua hop thoai len Foreground
-if ($dHwnd -ne [IntPtr]::Zero) {
-    [W32Click]::SetForegroundWindow($dHwnd)
-}
-Start-Sleep -Milliseconds 200
-
-# 3. Click chuot truc tiep vao giua o CodeBox de chac chan focus 100%
-try {
-    $cbRect = $codeBox.Current.BoundingRectangle
-    if ($cbRect.Width -gt 0 -and $cbRect.Height -gt 0) {
-        $cbX = [int]($cbRect.X + $cbRect.Width / 2)
-        $cbY = [int]($cbRect.Y + $cbRect.Height / 2)
-        [W32Click]::Click($cbX, $cbY)
-        Start-Sleep -Milliseconds 80
-    }
-} catch {}
-
-try { $codeBox.SetFocus() } catch {}
-Start-Sleep -Milliseconds 50
-
-# 4. Nhap ma phong vao CodeBox
-$roomCode = "__ROOM_CODE__"
-
-try {
-    $codeBox.SetFocus()
-    Start-Sleep -Milliseconds 50
-    [System.Windows.Forms.SendKeys]::SendWait('^a')
-    Start-Sleep -Milliseconds 40
-    [System.Windows.Forms.SendKeys]::SendWait('{BACKSPACE}')
-    Start-Sleep -Milliseconds 40
-} catch {}
-
-# A. ValuePattern
-try {
-    $vp = $codeBox.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-    $vp.SetValue($roomCode)
-} catch {}
-
-# B. SendKeys de chac chan WPF fire TextChanged va sang nut OK
-try {
-    [System.Windows.Forms.SendKeys]::SendWait($roomCode)
-} catch {}
-Start-Sleep -Milliseconds 150
-
-# 5. Tim nut submit trong dialog (nut "Vao room" hoac "OkButton", khong phai nut Huy)
-$btnOk = $null
-try {
-    $cBtn = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
-    $allBtns = $dlg.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cBtn)
-    for ($b = 0; $b -lt $allBtns.Count; $b++) {
-        $curB = $allBtns.Item($b)
-        $aid = $curB.Current.AutomationId
-        $bnm = $curB.Current.Name
-        if ($aid -eq 'OkButton' -or ($aid -ne 'CancelButton' -and $bnm -notlike '*Hủy*' -and $bnm -notlike '*Cancel*')) {
-            $btnOk = $curB
-            break
         }
     }
-} catch {}
-
-# 6. Cho OkButton sang (IsEnabled = true) va click xac nhan
-$clicked = $false
-for ($w = 0; $w -lt 30; $w++) {
-    if ($btnOk -and $btnOk.Current.IsEnabled) {
-        $rOk = $btnOk.Current.BoundingRectangle
-        if ($rOk.Width -gt 0 -and $rOk.Height -gt 0) {
-            $cx = [int]($rOk.X + $rOk.Width / 2)
-            $cy = [int]($rOk.Y + $rOk.Height / 2)
-            [W32Click]::Click($cx, $cy)
-            $clicked = $true
-        }
-        try {
-            $ip = $btnOk.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-            $ip.Invoke()
-            $clicked = $true
-        } catch {}
-        break
-    }
-    Start-Sleep -Milliseconds 100
-}
-
-# Neu chua click duoc nut OK thi gui Enter
-if (-not $clicked) {
-    try {
-        [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
-    } catch {}
-}
-
-# 7. XAC NHAN HOP THOAI DA DONG HOAN TOAN
-$dlgClosed = $false
-for ($c = 0; $c -lt 25; $c++) {
-    Start-Sleep -Milliseconds 250
-    $isOpen = $false
-    try {
-        if ($dHwnd -ne [IntPtr]::Zero) {
-            $cWinH = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NativeWindowHandleProperty, [int]$dHwnd)
-            $twCheck = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cWinH)
-            if ($twCheck -and -not $twCheck.Current.IsOffscreen) {
-                $isOpen = $true
-            }
-        }
-    } catch {
-        $isOpen = $false
-    }
-
-    if (-not $isOpen) {
-        $dlgClosed = $true
-        Write-Output "DIALOG_CLOSED_SUCCESS"
+    if (-not $button) { throw 'Ready control is unavailable.' }
+    $result.button_state = Get-ReadyButtonState $button.Current.Name
+    if ($result.button_state -eq 'recording') {
+        $result.status = 'recording'
+        Write-PlayerReadyResult
         exit 0
     }
-
-    # Kiem tra xem co bao loi ma phong khong
-    try {
-        $cText = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Text)
-        $dlgTexts = $dlg.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cText)
-        for ($dt = 0; $dt -lt $dlgTexts.Count; $dt++) {
-            $dtv = $dlgTexts.Item($dt).Current.Name
-            if ($dtv -like '*no room with invite code*' -or $dtv -like '*không tìm thấy*' -or $dtv -like '*room not found*' -or $dtv -like '*Error*' -or $dtv -like '*Lỗi*') {
-                [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
-                Write-Output "ERR_ROOM_NOT_FOUND"
-                exit 1
-            }
-        }
-    } catch {}
-
-    # Neu van con mo sau 1s thi thu Enter them 1 lan
-    if ($c -eq 4) {
-        try {
-            if ($btnOk -and $btnOk.Current.IsEnabled) {
-                $rOk = $btnOk.Current.BoundingRectangle
-                if ($rOk.Width -gt 0) {
-                    [W32Click]::Click([int]($rOk.X + $rOk.Width / 2), [int]($rOk.Y + $rOk.Height / 2))
-                }
+    $room = Get-ReadyText (Get-ReadyControl $win 'RoomBox')
+    $identity = Get-ReadyText (Get-ReadyControl $win 'PlayerBox')
+    $result.room_code = $room
+    $result.player_id = $identity
+    $join = Get-ReadyControl $win 'JoinButton'
+    $joinLabel = if ($join) { Normalize-ReadyLabel $join.Current.Name } else { '' }
+    if ($joinLabel -in @('vao room','vao phong','join room','join')) {
+        $result.status='not_in_room'; $result.error='Odx is not in a room.'
+    } elseif ($room -cnotmatch '^[A-Z0-9]{6}$' -or -not $identity -or -not $join) {
+        $result.status='unavailable'; $result.error='Room/player controls are unavailable.'
+    } elseif ($targetRoom -and $room -cne $targetRoom) {
+        $result.status='wrong_room'; $result.error='The Odx window is in a different room.'
+    } elseif ($targetPlayer -and $identity -cne $targetPlayer) {
+        $result.status='wrong_player'; $result.error='The Odx window belongs to a different player.'
+    } elseif ($joinLabel -notin @('roi room','roi phong','leave room','leave')) {
+        $result.status='unavailable'; $result.error='Room membership cannot be verified in Odx.'
+    } elseif ($result.button_state -eq 'unknown') {
+        $result.status='blocked'; $result.error='The button is not a Ready action.'
+    } elseif ($result.button_state -eq 'already_ready') {
+        $result.status='already_ready'
+    } elseif (-not $button.Current.IsEnabled) {
+        $result.status='disabled'; $result.error='The Ready action is disabled by Odx.'
+    } else {
+        $result.status='ready_action'
+        if ($allowInvoke) {
+            # Recheck the semantic action immediately before invoking, never
+            # synthesize mouse/keyboard events into a covered application.
+            if ((Get-ReadyButtonState $button.Current.Name) -ne 'ready_action' -or -not $button.Current.IsEnabled) {
+                $result.status='blocked'; $result.error='Odx changed state before Ready.'
             } else {
-                [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+                $result.invoked=$true
+                # InvokePattern activates some WPF providers. The native
+                # default action validates this exact control again and does
+                # not move focus, the pointer, or the window.
+                [OdxLegacyReady]::Invoke($script:OdxTargetHwnd.ToInt64(), $script:OdxTargetPid,
+                    $button.Current.AutomationId, $button.Current.Name, $button.GetRuntimeId())
+                $result.status='invoked'
             }
-        } catch {}
+        }
     }
+} catch {
+    $result.status='unavailable'
+    $result.error=[string]$_.Exception.Message
 }
+Write-PlayerReadyResult
+"""
+    result = (script.replace('__READY_ROOM__', _ps_literal(str(room_code or '').strip().upper()))
+              .replace('__READY_PLAYER__', _ps_literal(str(player_id or '').strip()))
+              .replace('__READY_INVOKE__', '$true' if allow_invoke else '$false'))
+    return (ready_action_preamble() if allow_invoke else '') + result
 
-if ($dlgClosed) {
-    Write-Output "DIALOG_CLOSED_SUCCESS"
-    exit 0
-} else {
-    try {
-        [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
-    } catch {}
-    Write-Output "DIALOG_STILL_OPEN"
-    exit 1
-}
-""".replace("__ROOM_CODE__", str(room_code))
 
-            res_b = run_ps_script(ps_step_b, timeout=15)
-            out_b = res_b.stdout if res_b else ""
-            log_event("STEP_B_CODE_INPUT", level="INFO" if "CODEBOX_FOUND" in out_b else "WARN", source="PLAYER", data={
-                "stdout": out_b.strip(),
-                "elapsed_ms": int((time.time() - t_start) * 1000)
-            })
+def _player_ready_report(result):
+    if result is None or result.returncode != 0:
+        return None
+    for line in reversed((result.stdout or '').splitlines()):
+        if line.startswith('ODX_PLAYER_READY:'):
+            try:
+                report = json.loads(line.partition(':')[2])
+                return report if isinstance(report, dict) else None
+            except (TypeError, ValueError):
+                return None
+    return None
 
-            if "ERR_ROOM_NOT_FOUND" in out_b or "DIALOG_STILL_OPEN" in out_b or "ERR_DIALOG_STILL_OPEN" in out_b:
-                if on_status:
-                    on_status(f"LỖI: Mã phòng [{room_code}] không tồn tại trên hệ thống Odx (Host chưa tạo hoặc sai mã)! Tool đã đóng popup.", "ERROR")
+
+def _ready_api_member(data, player_id):
+    """Classify a fresh server result without treating absent state as Ready."""
+    if not isinstance(data, dict) or data.get('error'):
+        return 'unverified', None, str((data or {}).get('message') or 'Không đọc được trạng thái phòng.') if isinstance(data, dict) else 'Không đọc được trạng thái phòng.'
+    if data.get('current_session'):
+        return 'recording', None, 'Phòng đang quay hoặc xử lý round; không đổi Ready.'
+    members = data.get('members')
+    if not isinstance(members, list):
+        return 'unverified', None, 'Danh sách thành viên không hợp lệ.'
+    matches = [member for member in members if isinstance(member, dict) and str(member.get('player_id', '')).strip() == player_id]
+    if len(matches) != 1:
+        return 'not_in_room', None, f'Chưa xác nhận thành viên [{player_id}] trong phòng.'
+    member = matches[0]
+    if str(data.get('host', '')).strip() == player_id:
+        return 'blocked', member, 'Đây là Host; không bật Ready bằng nút của Player.'
+    if member.get('problem'):
+        return 'blocked', member, str(member['problem'])
+    return ('confirmed' if member.get('ready') is True else 'pending'), member, ''
+
+
+@contextmanager
+def _temporary_ready_window_access():
+    """Temporarily make an unavailable provider reachable without activation.
+
+    Most WPF controls work minimized and need none of this. This fallback never
+    sends input, changes foreground ownership, or touches a foreign window.
+    """
+    hwnd, placement, user, was_visible, was_iconic, old_rect = None, None, None, None, None, None
+    changed = False
+    try:
+        from ctypes import wintypes
+        hwnd = find_odx_window()
+        if not hwnd or find_unmanaged_odx_window() or not is_managed_odx_window(hwnd):
+            raise ValueError('No owned window is available for recovery')
+
+        class WINDOWPLACEMENT(ctypes.Structure):
+            _fields_ = [('length', wintypes.UINT), ('flags', wintypes.UINT), ('showCmd', wintypes.UINT),
+                        ('ptMinPosition', wintypes.POINT), ('ptMaxPosition', wintypes.POINT), ('rcNormalPosition', wintypes.RECT)]
+
+        user = ctypes.WinDLL('user32', use_last_error=True)
+        user.GetWindowPlacement.argtypes = [wintypes.HWND, ctypes.POINTER(WINDOWPLACEMENT)]
+        user.SetWindowPlacement.argtypes = [wintypes.HWND, ctypes.POINTER(WINDOWPLACEMENT)]
+        user.IsIconic.argtypes = [wintypes.HWND]
+        user.IsWindowVisible.argtypes = [wintypes.HWND]
+        user.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
+        user.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user.MonitorFromWindow.restype = wintypes.HANDLE
+        user.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        placement = WINDOWPLACEMENT()
+        placement.length = ctypes.sizeof(placement)
+        if not user.GetWindowPlacement(hwnd, ctypes.byref(placement)):
+            raise ValueError('Cannot save the Odx window placement')
+        was_visible, was_iconic = bool(user.IsWindowVisible(hwnd)), bool(user.IsIconic(hwnd))
+        old_rect = wintypes.RECT()
+        if not user.GetWindowRect(hwnd, ctypes.byref(old_rect)):
+            raise ValueError('Cannot save the Odx window rectangle')
+        if was_iconic or not was_visible:
+            user.ShowWindowAsync(hwnd, 4)  # SW_SHOWNOACTIVATE; never steal focus.
+            changed = True
+        if not user.MonitorFromWindow(hwnd, 0):
+            # Return a wholly offscreen window to the primary work area only
+            # while querying its provider. Preserve size and z-order.
+            user.SetWindowPos(hwnd, None, 40, 40, 0, 0, 0x0010 | 0x0004 | 0x0001)
+            changed = True
+        if changed:
+            time.sleep(0.15)
+    except (OSError, AttributeError, ValueError, ctypes.ArgumentError):
+        pass
+    try:
+        yield changed
+    finally:
+        if changed and user and hwnd and is_managed_odx_window(hwnd):
+            try:
+                if was_iconic:
+                    placement.showCmd = 7  # SW_SHOWMINNOACTIVE
+                    user.SetWindowPlacement(hwnd, ctypes.byref(placement))
+                else:
+                    user.SetWindowPos(hwnd, None, old_rect.left, old_rect.top,
+                                      old_rect.right - old_rect.left, old_rect.bottom - old_rect.top,
+                                      0x0010 | 0x0004)
+                    if not was_visible:
+                        user.ShowWindowAsync(hwnd, 0)
+            except (OSError, AttributeError, ValueError, ctypes.ArgumentError):
+                pass
+
+
+_player_ready_lock = threading.Lock()
+
+
+def player_ensure_ready_in_room(room_code=None, on_status=None, player_id=None,
+                                cancel_event=None, can_ready=None, timeout=20):
+    """Set Ready through UIA once and confirm this player on the room server."""
+    cancellation = cancel_event if cancel_event is not None else threading.Event()
+
+    def notify(message, tag='PLAYER'):
+        if on_status:
+            try:
+                on_status(message, tag)
+            except Exception:
+                pass
+
+    def allowed():
+        if cancellation.is_set():
+            return False
+        if can_ready:
+            try:
+                return bool(can_ready())
+            except Exception:
+                return False
+        return True
+
+    def finish(status, error='', success=False):
+        worker.status, worker.error, worker.success = status, str(error), bool(success)
+        if success:
+            notify(f'Odx/server đã xác nhận Player [{worker.player_id}] SẴN SÀNG trong phòng [{worker.room_code}].', 'SUCCESS')
+        elif status != 'cancelled':
+            notify(worker.error or 'Chưa xác nhận trạng thái Ready từ Odx/server.', 'INFO' if status in {'recording', 'inflight'} else 'WARN')
+
+    def _worker():
+        if not _player_ready_lock.acquire(blocking=False):
+            finish('inflight', 'Một thao tác Ready khác đang chạy; không gửi lệnh trùng.')
+            return
+        try:
+            if not allowed():
+                finish('cancelled')
                 return
-            elif "DIALOG_CLOSED_SUCCESS" in out_b:
-                if on_status:
-                    on_status(f"Đã nhập mã [{room_code}] & đóng hộp thoại thành công! Đang xác thực vào phòng...", "PLAYER")
-            elif "ERR_DIALOG_NOT_FOUND" in out_b:
-                if on_status:
-                    on_status("Không mở được hộp thoại Vào room trên Odx Capture.", "WARN")
+            target_room = str(room_code or '').strip().upper()
+            identity = str(player_id or '').strip()
+            if target_room and not re.fullmatch(r'[A-Z0-9]{6}', target_room, flags=re.ASCII):
+                finish('invalid_room', 'Mã phòng phải gồm đúng 6 chữ/số ASCII.')
                 return
+            try:
+                duration = float(timeout)
+                if not 0 < duration <= 120:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                finish('error', 'Thời gian chờ Ready không hợp lệ.')
+                return
+            deadline, attempted, restored = time.monotonic() + duration, False, False
+            last_status, last_error = 'unverified', 'Chưa nhận được xác nhận Ready.'
+            with ExitStack() as access:
+                while time.monotonic() < deadline:
+                    if not allowed():
+                        finish('cancelled')
+                        return
+                    data = fetch_room_status(target_room) if target_room else None
+                    if isinstance(data, dict) and data.get('current_session'):
+                        finish('recording', 'Phòng đã bắt đầu round; không đổi Ready.')
+                        return
+                    report = _player_ready_report(run_ps_script(
+                        _player_ready_script(target_room, identity), timeout=min(5, max(.01, deadline - time.monotonic()))))
+                    if not allowed():
+                        finish('cancelled')
+                        return
+                    if report and report.get('status') == 'recording':
+                        finish('recording', 'Odx đang quay/đếm ngược/lưu; không đổi Ready.')
+                        return
+                    if report and report.get('status') in {'wrong_room', 'wrong_player', 'blocked'}:
+                        finish(report['status'], report.get('error', 'Odx chưa ở đúng phòng/trạng thái Player.'))
+                        return
+                    if report and report.get('status') == 'not_in_room':
+                        # Closing JoinRoomDialog can precede room binding in
+                        # WPF. Wait for that transition without ever toggling
+                        # a Solo recording button.
+                        last_status = 'not_in_room'
+                        last_error = report.get('error') or 'Chưa xác nhận Odx vào phòng.'
+                    elif not report or report.get('status') == 'unavailable':
+                        last_error = report.get('error', '') if report else 'Không đọc được UIAutomation của Odx.'
+                        # Require an idle room response before changing window
+                        # presentation; never restore an unknown active capture.
+                        if not restored and isinstance(data, dict) and not data.get('error') and target_room:
+                            restored = True
+                            access.enter_context(_temporary_ready_window_access())
+                            continue
+                        last_status = 'unverified'
+                    else:
+                        actual_room = str(report.get('room_code') or '').strip()
+                        actual_player = str(report.get('player_id') or '').strip()
+                        if not re.fullmatch(r'[A-Z0-9]{6}', actual_room, flags=re.ASCII) or not actual_player:
+                            finish('unverified', 'Không xác nhận được mã phòng và Player ID từ Odx.')
+                            return
+                        target_room = target_room or actual_room
+                        identity = identity or actual_player
+                        if actual_room != target_room or actual_player != identity:
+                            finish('wrong_identity', 'Phòng hoặc Player ID của Odx đã thay đổi.')
+                            return
+                        worker.room_code, worker.player_id = target_room, identity
+                        if data is None:
+                            data = fetch_room_status(target_room)
+                        api_status, member, error = _ready_api_member(data, identity)
+                        worker.joined = member is not None
+                        if api_status == 'confirmed':
+                            if allowed():
+                                finish('confirmed', success=True)
+                            else:
+                                finish('cancelled')
+                            return
+                        if api_status in {'recording', 'blocked'}:
+                            finish(api_status, error)
+                            return
+                        last_status, last_error = api_status, error or 'Đang chờ server xác nhận Ready.'
+                        if (api_status == 'pending' and report.get('status') == 'ready_action' and not attempted):
+                            if not allowed():
+                                finish('cancelled')
+                                return
+                            attempted = True
+                            response = _player_ready_report(run_ps_script(
+                                _player_ready_script(target_room, identity, True),
+                                timeout=min(5, max(.01, deadline - time.monotonic()))))
+                            worker.invoked = bool(response and response.get('invoked'))
+                            if response and response.get('status') in {'recording', 'wrong_room', 'wrong_player', 'not_in_room', 'blocked'}:
+                                finish(response['status'], response.get('error') or 'Odx đã đổi trạng thái trước khi Ready.')
+                                return
+                            if not response or response.get('status') == 'unavailable':
+                                last_error = 'Lệnh Ready chưa được xác nhận; không bấm lại để tránh tắt Ready.'
+                    cancellation.wait(min(.4, max(0, deadline - time.monotonic())))
+            finish(last_status, last_error or 'Chưa xác nhận Ready trong thời gian chờ.')
+        except Exception as exc:
+            if not allowed():
+                finish('cancelled')
             else:
-                if on_status:
-                    on_status(f"Chưa đóng được hộp thoại Vào room với mã [{room_code}]. Vui lòng kiểm tra lại mã phòng.", "WARN")
+                finish('error', f'Auto-Ready chưa hoàn tất: {exc}')
+        finally:
+            _player_ready_lock.release()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.success, worker.status, worker.error = False, 'pending', ''
+    worker.invoked, worker.joined = False, False
+    worker.room_code, worker.player_id = '', ''
+    worker.cancel_event = cancellation
+    worker.start()
+    return worker
+
+
+def _host_room_script(allow_create=False, context=None):
+    """Read/create only inside the managed Odx window; never use screen clicks."""
+    return """
+$allowCreate = __ALLOW_CREATE__
+$result = @{status='waiting'; room_code=''; player_id=''; is_host=$false; can_create=$false; clicked=$false; error=''}
+function Write-HostRoomResult {
+    $result.hwnd=$script:OdxTargetHwnd.ToInt64(); $result.pid=$script:OdxTargetPid
+    Write-Output ('ODX_HOST_ROOM:' + ($result | ConvertTo-Json -Compress))
+}
+function Get-HostRoomCode($window) {
+    foreach ($automationId in @('RoomBox', 'RoomCodeBox', 'RoomCodeText', 'RoomCodeLabel')) {
+        $condition = [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::AutomationIdProperty, $automationId)
+        $element = $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+        if (-not $element -or $element.Current.ProcessId -ne $script:OdxTargetPid) {
+            continue
+        }
+        $text = ''
+        $hasValuePattern = $false
+        try {
+            $valuePattern = $element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+            if ($valuePattern) {
+                $hasValuePattern = $true
+                $text = [string]$valuePattern.Current.Value
+            }
+        } catch { }
+        if (-not $hasValuePattern) {
+            try { $text = [string]$element.Current.Name } catch { }
+        }
+        $text = $text.Trim()
+        if ($text -cmatch '^[A-Z0-9]{6}$') { return $text }
+    }
+    return ''
+}
+function Get-HostCreateButton($window) {
+    $buttonCondition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::Button)
+    $buttons = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
+    foreach ($automationId in @('CreateButton', 'CreateRoomButton', 'RoomCreateButton')) {
+        foreach ($button in $buttons) {
+            if ($button.Current.ProcessId -eq $script:OdxTargetPid -and
+                $button.Current.AutomationId -ceq $automationId -and
+                $button.Current.IsEnabled) {
+                $label = ([string]$button.Current.Name).Replace('&', '').Replace('_', '').Trim()
+                if ($label -in @('Tạo room', 'Tạo phòng', 'Tao room', 'Tao phong', 'Create room', 'Create a room')) { return $button }
+            }
+        }
+    }
+    foreach ($button in $buttons) {
+        if ($button.Current.ProcessId -ne $script:OdxTargetPid -or
+            -not $button.Current.IsEnabled) { continue }
+        $label = ([string]$button.Current.Name).Replace('&', '').Replace('_', '').Trim()
+        if ($label -in @('Tạo room', 'Tạo phòng', 'Tao room', 'Tao phong', 'Create room', 'Create a room')) {
+            return $button
+        }
+    }
+    return $null
+}
+try {
+    if ((__EXPECTED_HWND__ -and $script:OdxTargetHwnd.ToInt64() -ne __EXPECTED_HWND__) -or
+        (__EXPECTED_PID__ -and $script:OdxTargetPid -ne __EXPECTED_PID__)) { throw 'Managed Odx window changed.' }
+    $win = Get-OwnedOdxMainWindow
+    if (-not $win) { throw 'Managed Odx window is not ready.' }
+    $idCondition=[System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,'PlayerBox')
+    $identity=$win.FindFirst([System.Windows.Automation.TreeScope]::Descendants,$idCondition)
+    if ($identity) {
+        $result.player_id=([string]$identity.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value).Trim()
+    }
+    $createCondition=[System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,'CreateButton')
+    $nativeCreate=$win.FindFirst([System.Windows.Automation.TreeScope]::Descendants,$createCondition)
+    if ($nativeCreate -and $nativeCreate.Current.IsEnabled) {
+        $nativeLabel=([string]$nativeCreate.Current.Name).Replace('&','').Replace('_','').Trim().ToLowerInvariant()
+        $result.is_host=$nativeLabel -in @('đóng room','đóng phòng','close room','close')
+    }
+    $roomCode = Get-HostRoomCode $win
+    if ($roomCode -and $result.is_host) {
+        $result.status = 'room'
+        $result.room_code = $roomCode
+        Write-HostRoomResult
+        exit 0
+    }
+    $create = Get-HostCreateButton $win
+    if (-not $create) {
+        $result.error = 'Create room button is not ready.'
+        Write-HostRoomResult
+        exit 0
+    }
+    $invoke = $create.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+    if (-not $invoke) { throw 'Create room button does not support InvokePattern.' }
+    $result.can_create = $true
+    $result.status = 'ready'
+    if ($allowCreate) {
+        $label=([string]$create.Current.Name).Replace('&','').Replace('_','').Trim()
+        if ($label -notin @('Tạo room', 'Tạo phòng', 'Tao room', 'Tao phong', 'Create room', 'Create a room') -or
+            -not $create.Current.IsEnabled) { throw 'Create room state changed; no command sent.' }
+        # Mark before Invoke: if the provider fails after dispatch, never click twice.
+        $result.clicked = $true
+        $invoke.Invoke()
+        $result.status = 'clicked'
+        $result.room_code = Get-HostRoomCode $win
+    }
+} catch {
+    $result.status = 'error'
+    $result.error = [string]$_.Exception.Message
+}
+Write-HostRoomResult
+""".replace('__ALLOW_CREATE__', '$true' if allow_create else '$false').replace(
+        '__EXPECTED_HWND__', str(int(context[0])) if context else '0').replace(
+        '__EXPECTED_PID__', str(int(context[1])) if context else '0')
+
+
+def _host_room_code(value):
+    text = value.strip() if isinstance(value, str) else ''
+    return text if re.fullmatch(r'[A-Z0-9]{6}', text, flags=re.ASCII) else ''
+
+
+def _host_room_report(result):
+    if result is None or result.returncode != 0:
+        return None
+    for line in reversed((result.stdout or '').splitlines()):
+        if not line.startswith('ODX_HOST_ROOM:'):
+            continue
+        try:
+            report = json.loads(line.partition(':')[2])
+        except (TypeError, ValueError):
+            return None
+        if isinstance(report, dict) and report.get('status') in {'waiting', 'ready', 'room', 'clicked', 'error'}:
+            return report
+    return None
+
+
+_host_room_creation_lock = threading.Lock()
+
+
+def host_auto_create_room(on_status=None, cancel_event=None, timeout=60, room_code_supplier=None):
+    """Create a Host room once and confirm its code before reporting success.
+
+    ``room_code_supplier`` may return a fresh code from the caller's log follower.
+    The returned thread exposes ``success``, ``room_code``, ``error``, ``clicked``
+    and ``click_attempted``; these are initialized before the worker starts.
+    Cancellation is checked between bounded read-only UI snapshots. No retry can
+    issue a second create command after an uncertain first click.
+    """
+    cancellation = cancel_event if cancel_event is not None else threading.Event()
+
+    def notify(message, tag='HOST'):
+        if on_status:
+            try:
+                on_status(message, tag)
+            except Exception:
+                pass
+
+    def cancelled():
+        if cancellation.is_set():
+            worker_thread.error = 'Đã hủy thao tác tạo phòng.'
+            notify(worker_thread.error)
+            return True
+        return False
+
+    def confirm(code, report):
+        code = _host_room_code(code)
+        identity = str((report or {}).get('player_id') or '').strip()
+        if code and identity and report.get('is_host') is True and not cancelled():
+            data = fetch_room_status(code)
+            if (not isinstance(data, dict) or data.get('error') or
+                    str(data.get('host') or '').strip() != identity or
+                    not isinstance(data.get('members'), list) or
+                    sum(isinstance(member, dict) and str(member.get('player_id') or '').strip() == identity
+                        for member in data['members']) != 1):
+                return False
+            worker_thread.room_code = code
+            worker_thread.success = True
+            worker_thread.error = ''
+            notify(f'Đã xác nhận phòng Host [{code}]. Đang đồng bộ danh sách thành viên.', 'SUCCESS')
+            return True
+        return False
+
+    def _worker():
+        if not _host_room_creation_lock.acquire(blocking=False):
+            worker_thread.error = 'Một thao tác tạo phòng đang chạy; không gửi lệnh tạo trùng.'
+            notify(worker_thread.error, 'ERROR')
+            return
+        try:
+            try:
+                wait_seconds = float(timeout)
+                if not 0 < wait_seconds <= 180:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                worker_thread.error = 'Thời gian chờ tạo phòng phải lớn hơn 0 và tối đa 180 giây.'
+                notify(worker_thread.error, 'ERROR')
                 return
+            deadline = time.monotonic() + wait_seconds
+            context = _owned_uia_context(min(2, wait_seconds))
+            if context is None:
+                raise RuntimeError('Chưa tìm thấy đúng cửa sổ Odx do tool mở.')
+            context = tuple(context)
 
-        # ============================================================
-        # STEP C: Kiem tra da vao phong chua, neu hop le moi bam San sang (KHONG DUNG F10!)
-        # ============================================================
-        time.sleep(0.8)
-        ps_step_c = """
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class W32Click { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e); public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(2, 0, 0, 0, UIntPtr.Zero); System.Threading.Thread.Sleep(50); mouse_event(4, 0, 0, 0, UIntPtr.Zero); } }'
+            def read(allow_create, duration):
+                if cancelled():
+                    return None
+                if _owned_uia_context(0) != context:
+                    raise RuntimeError('Cửa sổ Odx đã thay đổi; không tạo phòng trên phiên khác.')
+                report = _host_room_report(run_ps_script(_host_room_script(allow_create, context=context), timeout=duration))
+                if report and (report.get('hwnd') != context[0] or report.get('pid') != context[1]):
+                    raise RuntimeError('Xác nhận tạo phòng không đúng cửa sổ Odx đang quản lý.')
+                return report
 
-$root = [System.Windows.Automation.AutomationElement]::RootElement
-$win = $null
+            last_error = 'Chưa tìm thấy nút Tạo room sẵn sàng trong cửa sổ Odx.'
+            notify('Đang chờ Odx sẵn sàng để tự động tạo phòng...')
+            while time.monotonic() < deadline:
+                if cancelled():
+                    return
+                if room_code_supplier:
+                    try:
+                        supplied = room_code_supplier()
+                    except Exception:
+                        supplied = None
+                    # The follower is a hint only. Native host state and a fresh
+                    # server response must agree before any room is accepted.
+                    supplied = _host_room_code(supplied)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                report = read(False, min(6, remaining))
+                if cancelled():
+                    return
+                if report:
+                    if confirm(report.get('room_code'), report):
+                        return
+                    if report.get('is_host') and report.get('room_code'):
+                        last_error = 'Odx đang ở phòng Host nhưng máy chủ chưa xác nhận đúng Host/thành viên.'
+                    if report.get('error'):
+                        last_error = str(report['error'])
+                    if report.get('can_create') is True and not worker_thread.click_attempted:
+                        # Set before launching the mutating script. Lost output must
+                        # never cause a repeated click and a second server room.
+                        worker_thread.click_attempted = True
+                        notify('Đang tự động bấm [Tạo room] trên Odx Capture...')
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0 or cancelled():
+                            break
+                        invoked = read(True, min(8, remaining))
+                        if cancelled():
+                            return
+                        if invoked:
+                            worker_thread.clicked = invoked.get('clicked') is True
+                            if confirm(invoked.get('room_code'), invoked):
+                                return
+                            if invoked.get('error'):
+                                last_error = str(invoked['error'])
+                        else:
+                            last_error = 'Chưa xác nhận kết quả lệnh tạo phòng; sẽ không bấm tạo lần hai.'
+                        notify('Đã gửi một lệnh tạo phòng; đang chờ mã phòng từ Odx...')
+                else:
+                    last_error = 'Không đọc được trạng thái cửa sổ Odx do tool quản lý.'
+                if cancellation.wait(min(0.25, max(0, deadline - time.monotonic()))):
+                    cancelled()
+                    return
+            worker_thread.error = ('Đã gửi lệnh nhưng chưa nhận được mã phòng hợp lệ. ' if worker_thread.click_attempted else
+                                   'Chưa tạo được phòng tự động. ') + last_error
+            notify(worker_thread.error, 'ERROR')
+        except Exception as exc:
+            worker_thread.error = f'Không thể tự động tạo phòng: {exc}'
+            notify(worker_thread.error, 'ERROR')
+        finally:
+            _host_room_creation_lock.release()
 
-for ($w = 0; $w -lt 25; $w++) {
-    $cName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, 'Odx Capture')
-    $win = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cName)
-    if (-not $win) {
-        $procs = Get-Process -Name 'odx-app', 'Odx Capture' -ErrorAction SilentlyContinue
-        foreach ($p in $procs) {
-            if ($p.MainWindowHandle -ne 0) {
-                try { $win = [System.Windows.Automation.AutomationElement]::FromHandle($p.MainWindowHandle); if ($win) { break } } catch {}
-            }
-        }
-    }
-    if ($win) { break }
-    Start-Sleep -Milliseconds 400
-}
-if (-not $win) { Write-Output "ERR_NO_WINDOW"; exit 1 }
-$odxPid = $win.Current.ProcessId
-
-$targetRoom = "__ROOM_CODE__"
-$inRoom = $false
-
-# Cho toi da 15 giay de Odx ket noi va dong bo vao phong
-for ($m = 0; $m -lt 30; $m++) {
-    Start-Sleep -Milliseconds 500
-
-    # 1. Kiem tra xem hop thoai JoinRoomDialog co con bi treo loi khong
-    $allW = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
-    for ($i = 0; $i -lt $allW.Count; $i++) {
-        $tw = $allW.Item($i)
-        try {
-            $dnm = $tw.Current.Name
-            if ($dnm -like '*Vào room*' -or $dnm -like '*Join room*' -or $dnm -eq 'Vào room') {
-                $cText = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Text)
-                $dlgTexts = $tw.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cText)
-                for ($dt = 0; $dt -lt $dlgTexts.Count; $dt++) {
-                    $dtv = $dlgTexts.Item($dt).Current.Name
-                    if ($dtv -like '*no room with invite code*' -or $dtv -like '*error*' -or $dtv -like '*không tìm thấy*') {
-                        [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
-                        Write-Output "ERR_ROOM_NOT_FOUND"
-                        exit 1
-                    }
-                }
-            }
-        } catch {}
-    }
-
-    # 2. Kiem tra xem da thuc su vao phong chua
-    # a. JoinButton doi thanh 'Roi room' / 'Leave'
-    $cJoin = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'JoinButton')
-    $btnJ = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cJoin)
-    if ($btnJ) {
-        $jnm = $btnJ.Current.Name
-        if ($jnm -like '*Rời*' -or $jnm -like '*Leave*') {
-            $inRoom = $true
-            break
-        }
-    }
-
-    # b. RoomBox visible va chua dung ma phong target
-    $cRoomBox = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'RoomBox')
-    $roomBox = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cRoomBox)
-    if ($roomBox -and -not $roomBox.Current.IsOffscreen) {
-        $rbVal = ""
-        try { $rbVal = $roomBox.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value } catch {}
-        if (-not $rbVal) { $rbVal = $roomBox.Current.Name }
-        if ($rbVal -and ($rbVal.Trim().ToUpper() -eq $targetRoom.Trim().ToUpper() -or $rbVal -like "*$targetRoom*")) {
-            $inRoom = $true
-            break
-        }
-    }
-}
-
-if (-not $inRoom) {
-    Write-Output "ERR_NOT_IN_ROOM"
-    exit 0
-}
-
-# ============================================================
-# DA O TRONG PHONG: BAT SAN SANG (TUYET DOI KHONG DUNG F10!)
-# ============================================================
-$cStart = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'StartStopButton')
-$btnStart = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cStart)
-
-if (-not $btnStart) {
-    $cBT = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
-    $wBtns = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cBT)
-    for ($y = 0; $y -lt $wBtns.Count; $y++) {
-        $wb = $wBtns.Item($y)
-        $wnm = $wb.Current.Name
-        if ($wnm -like '*sàng*' -or $wnm -like '*Ready*') {
-            $btnStart = $wb
-            break
-        }
-    }
-}
-
-if ($btnStart) {
-    $nm = $btnStart.Current.Name
-
-    # Da o trong phong va da bat san sang truoc do hoac host dang ghi
-    if ($nm -like '*Hủy*' -or $nm -like '*Unready*' -or $nm -like '*round*' -or $nm -like '*Đang*') {
-        Write-Output "ALREADY_READY"
-        exit 0
-    }
-
-    # CHI BAM KHI NUT LA SAN SANG / READY
-    if ($nm -like '*sàng*' -or $nm -like '*Ready*') {
-        try {
-            $ipR = $btnStart.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-            $ipR.Invoke()
-            Write-Output "AUTO_READY_SUCCESS"
-            exit 0
-        } catch {
-            try {
-                $rS = $btnStart.Current.BoundingRectangle
-                if ($rS.Width -gt 0) {
-                    [W32Click]::Click([int]($rS.X + $rS.Width / 2), [int]($rS.Y + $rS.Height / 2))
-                    Write-Output "AUTO_READY_SUCCESS"
-                    exit 0
-                }
-            } catch {
-                try {
-                    $btnStart.SetFocus()
-                    [System.Windows.Forms.SendKeys]::SendWait(' ')
-                    Write-Output "AUTO_READY_SUCCESS"
-                    exit 0
-                } catch {}
-            }
-        }
-    } elseif ($nm -like '*Bắt đầu*' -or $nm -like '*ghi hình*' -or $nm -like '*Record*') {
-        # CANH BAO: Nut ghi hinh Solo -> TUYET DOI KHONG BAM!
-        Write-Output "ERR_SOLO_BUTTON_DETECTED"
-        exit 0
-    }
-}
-
-Write-Output "IN_ROOM_OK"
-exit 0
-""".replace("__ROOM_CODE__", str(room_code))
-        res_c = run_ps_script(ps_step_c, timeout=20)
-        out_c = res_c.stdout if res_c else ""
-        log_event("STEP_C_READY", level="SUCCESS" if ("AUTO_READY_SUCCESS" in out_c or "ALREADY_READY" in out_c) else "WARN", source="PLAYER", data={
-            "stdout": out_c.strip(),
-            "total_elapsed_ms": int((time.time() - t_start) * 1000)
-        })
-
-        if "AUTO_READY_SUCCESS" in out_c or "ALREADY_READY" in out_c:
-            if on_status:
-                on_status(f"★ [✓ AUTO-READY 100%] ĐÃ TỰ ĐỘNG VÀO PHÒNG [{room_code}] VÀ BẬT SẴN SÀNG!", "SUCCESS")
-        elif "ERR_ROOM_NOT_FOUND" in out_c:
-            if on_status:
-                on_status(f"LỖI: Mã phòng [{room_code}] không tồn tại trên Odx (Host chưa tạo hoặc mã sai)! Tool đã dừng để tránh quay solo.", "ERROR")
-        elif "ERR_NOT_IN_ROOM" in out_c:
-            if on_status:
-                on_status(f"Chưa vào được phòng [{room_code}] (Host chưa tạo hoặc mã phòng ảo). Tool KHÔNG tự ý bấm quay solo.", "WARN")
-        else:
-            if on_status:
-                on_status(f"Đã phát lệnh kết nối phòng [{room_code}]. Đang chờ Odx đồng bộ...", "INFO")
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-    return t
-
-def player_ensure_ready_in_room(room_code=None, on_status=None):
-    """Kiem tra xem May con co dang o trong phong khong, neu chua San sang thi tu dong bam San sang (TUYET DOI KHONG DUNG F10)."""
-    def _worker():
-        ps_code = """
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class W32Click { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e); public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(2, 0, 0, 0, UIntPtr.Zero); System.Threading.Thread.Sleep(50); mouse_event(4, 0, 0, 0, UIntPtr.Zero); } }'
-
-$root = [System.Windows.Automation.AutomationElement]::RootElement
-$cName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, 'Odx Capture')
-$win = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cName)
-if (-not $win) { exit 1 }
-
-$targetRoom = "__ROOM_CODE__"
-$inRoom = $false
-
-# 1. Kiem tra JoinButton (khi o trong room luon la 'Roi room' / 'Leave')
-$cJoin = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'JoinButton')
-$btnJ = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cJoin)
-if ($btnJ) {
-    $jnm = $btnJ.Current.Name
-    if ($jnm -like '*Rời*' -or $jnm -like '*Leave*') {
-        $inRoom = $true
-    }
-}
-
-# 2. Kiem tra RoomBox
-if (-not $inRoom) {
-    $cRoomBox = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'RoomBox')
-    $roomBox = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cRoomBox)
-    if ($roomBox -and -not $roomBox.Current.IsOffscreen) {
-        $rbVal = ""
-        try { $rbVal = $roomBox.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value } catch {}
-        if (-not $rbVal) { $rbVal = $roomBox.Current.Name }
-        if ($rbVal -and ($targetRoom -eq 'ALL' -or $rbVal.Trim().ToUpper() -eq $targetRoom.Trim().ToUpper() -or $rbVal -like "*$targetRoom*")) {
-            $inRoom = $true
-        }
-    }
-}
-
-if (-not $inRoom) { exit 1 }
-
-# Da o trong phong -> Tim StartStopButton de san sang
-$cStart = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'StartStopButton')
-$btnStart = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cStart)
-if (-not $btnStart) {
-    $cBT = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
-    $allB = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cBT)
-    for ($b = 0; $b -lt $allB.Count; $b++) {
-        $bnm = $allB.Item($b).Current.Name
-        if ($bnm -like '*sàng*' -or $bnm -like '*Ready*') {
-            $btnStart = $allB.Item($b)
-            break
-        }
-    }
-}
-
-if ($btnStart) {
-    $nm = $btnStart.Current.Name
-    if ($nm -like '*Hủy*' -or $nm -like '*Unready*' -or $nm -like '*round*' -or $nm -like '*Đang*') {
-        Write-Output "ALREADY_READY"
-        exit 0
-    }
-    if ($nm -like '*sàng*' -or $nm -like '*Ready*') {
-        try {
-            $ip = $btnStart.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-            $ip.Invoke()
-            Write-Output "READY_OK"
-            exit 0
-        } catch {
-            try {
-                $rS = $btnStart.Current.BoundingRectangle
-                if ($rS.Width -gt 0) {
-                    [W32Click]::Click([int]($rS.X + $rS.Width / 2), [int]($rS.Y + $rS.Height / 2))
-                    Write-Output "READY_OK"
-                    exit 0
-                }
-            } catch {
-                try {
-                    $btnStart.SetFocus()
-                    [System.Windows.Forms.SendKeys]::SendWait(' ')
-                    Write-Output "READY_OK"
-                    exit 0
-                } catch {}
-            }
-        }
-    }
-}
-exit 0
-""".replace("__ROOM_CODE__", str(room_code) if room_code else "ALL")
-        res = run_ps_script(ps_code, timeout=8)
-        out = res.stdout if res else ""
-        if "READY_OK" in out:
-            if on_status:
-                on_status("★ [✓ AUTO-READY 100%] Máy con đã tự động bật SẴN SÀNG cho round tiếp theo!", "SUCCESS")
-        elif "ALREADY_READY" in out:
-            pass
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-    return t
-
-def host_auto_create_room(on_status=None):
-    """Tu dong tim cua so Odx Capture va bam [Tao room] (CreateButton) cho Host."""
-    def _worker():
-        ps_code = """
-        Add-Type -AssemblyName UIAutomationClient
-        Add-Type -AssemblyName UIAutomationTypes
-
-        $root = [System.Windows.Automation.AutomationElement]::RootElement
-        $win = $null
-
-        for ($w = 0; $w -lt 25; $w++) {
-            $cName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, 'Odx Capture')
-            $win = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cName)
-            if (-not $win) {
-                $procs = Get-Process -Name 'odx-app', 'Odx Capture' -ErrorAction SilentlyContinue
-                foreach ($p in $procs) {
-                    if ($p.MainWindowHandle -ne 0) {
-                        $win = [System.Windows.Automation.AutomationElement]::FromHandle($p.MainWindowHandle)
-                        if ($win) { break }
-                    }
-                }
-            }
-            if ($win) { break }
-            Start-Sleep -Milliseconds 400
-        }
-
-        if ($win) {
-            # Kiem tra xem da co room chua
-            $cRoom = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'RoomBox')
-            $rBox = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cRoom)
-            $hasRoom = $false
-            if ($rBox) {
-                try {
-                    $vpR = $rBox.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-                    if ($vpR.Current.Value -and $vpR.Current.Value.Length -ge 4) {
-                        $hasRoom = $true
-                    }
-                } catch {}
-            }
-
-            if (-not $hasRoom) {
-                $cCreate = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'CreateButton')
-                $btnCreate = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cCreate)
-                if ($btnCreate) {
-                    try {
-                        $ipCreate = $btnCreate.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-                        $ipCreate.Invoke()
-                        Write-Output "CREATE_ROOM_CLICKED"
-                        exit 0
-                    } catch {}
-                }
-            }
-        }
-        exit 0
-        """
-        res = run_ps_script(ps_code, timeout=15)
-        out = res.stdout if res else ""
-        if "CREATE_ROOM_CLICKED" in out:
-            if on_status:
-                on_status("Đã tự động bấm [Tạo room] trên Odx Capture!", "HOST")
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-    return t
+    worker_thread = threading.Thread(target=_worker, daemon=True)
+    worker_thread.success = False
+    worker_thread.room_code = ''
+    worker_thread.error = ''
+    worker_thread.clicked = False
+    worker_thread.click_attempted = False
+    worker_thread.cancel_event = cancellation
+    worker_thread.start()
+    return worker_thread
 
 def send_toggle_hotkey(hwnd=None):
+    """Send Odx's F10 start/end command; F11 belongs to tool choices."""
     user32 = ctypes.windll.user32
     VK_F10 = 0x79
     KEYEVENTF_KEYUP = 0x0002
@@ -1477,17 +2176,6 @@ def send_toggle_hotkey(hwnd=None):
     user32.keybd_event(VK_F10, scan_code, 0, 0)
     time.sleep(0.05)
     user32.keybd_event(VK_F10, scan_code, KEYEVENTF_KEYUP, 0)
-    return True
-
-def send_abort_hotkey(hwnd=None):
-    """Gửi phím tắt F11 (VK_F11: 0x7A) trực tiếp để hủy khẩn cấp round trong Odx Capture."""
-    user32 = ctypes.windll.user32
-    VK_F11 = 0x7A
-    KEYEVENTF_KEYUP = 0x0002
-    scan_code = user32.MapVirtualKeyW(VK_F11, 0)
-    user32.keybd_event(VK_F11, scan_code, 0, 0)
-    time.sleep(0.05)
-    user32.keybd_event(VK_F11, scan_code, KEYEVENTF_KEYUP, 0)
     return True
 
 def get_target_duration_for_task(task_id):
@@ -1500,32 +2188,374 @@ def get_target_duration_for_task(task_id):
     offset = (h % 11) - 5  # -5 to +5 (235s to 245s)
     return 240 + offset
 
-def stop_recording_verified(follower, active_task_id, hwnd=None, max_retry=4):
-    user32 = ctypes.windll.user32
-    VK_F10 = 0x79
-    KEYEVENTF_KEYUP = 0x0002
-    scan_code = user32.MapVirtualKeyW(VK_F10, 0)
+def _host_stop_script(task, allow_armed=False, invoke=False, context=None,
+                      expected_room=None, expected_player=None):
+    """Inspect/invoke only the owned Host's semantic End round action."""
+    script = r"""
+$targetTask=__TARGET_TASK__; $allowInvoke=__INVOKE__
+$expectedRoom=__EXPECTED_ROOM__; $expectedPlayer=__EXPECTED_PLAYER__
+$result=@{status='unavailable';room_code='';player_id='';task_id='';is_host=$false;button_state='unknown';invoked=$false;error=''}
+function Write-HostStopResult {
+    $result.hwnd=$script:OdxTargetHwnd.ToInt64();$result.pid=$script:OdxTargetPid
+    Write-Output ('ODX_HOST_STOP:' + ($result|ConvertTo-Json -Compress))
+}
+function Get-StopControl($win,[string]$id) {
+    $condition=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::AutomationIdProperty,$id)
+    $control=$win.FindFirst([System.Windows.Automation.TreeScope]::Descendants,$condition)
+    if ($control -and $control.Current.ProcessId -eq $script:OdxTargetPid) {return $control}
+    return $null
+}
+function Get-StopText($control) {
+    if (-not $control) {return ''}
+    try {return ([string]$control.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value).Trim()} catch {}
+    return ([string]$control.Current.Name).Trim()
+}
+function Normalize-StopLabel([string]$text) {
+    $text=$text.Replace('&','').Replace('_','').Trim().ToLowerInvariant()
+    $text=[regex]::Replace($text,'\s*\([^)]*\)\s*$','')
+    $buffer=[Text.StringBuilder]::new()
+    foreach($character in $text.Normalize([Text.NormalizationForm]::FormD).ToCharArray()) {
+        if([Globalization.CharUnicodeInfo]::GetUnicodeCategory($character) -ne [Globalization.UnicodeCategory]::NonSpacingMark) {[void]$buffer.Append($character)}
+    }
+    return ([regex]::Replace($buffer.ToString().Replace('đ','d'),'\s+',' ')).Trim()
+}
+function Get-StopState([string]$text) {
+    $label=Normalize-StopLabel $text
+    if($label -in @('ket thuc round','end round')) {return 'stop_action'}
+    if($label -match '^(dang dung|stopping)') {return 'ending'}
+    if($label -in @('bat dau round','start round') -or $label -match '^(cho .* (san sang|luu xong round truoc)|waiting for .* (ready|save the last round))') {return 'stopped'}
+    return 'blocked'
+}
+try {
+    if((__EXPECTED_HWND__ -and $script:OdxTargetHwnd.ToInt64() -ne __EXPECTED_HWND__) -or
+       (__EXPECTED_PID__ -and $script:OdxTargetPid -ne __EXPECTED_PID__)) {throw 'STOP_WINDOW_CHANGED'}
+    $win=Get-OwnedOdxMainWindow
+    if(-not $win) {throw 'STOP_WINDOW_UNAVAILABLE'}
+    $create=Get-StopControl $win 'CreateButton';$join=Get-StopControl $win 'JoinButton'
+    $room=Get-StopControl $win 'RoomBox';$player=Get-StopControl $win 'PlayerBox';$taskBox=Get-StopControl $win 'TaskBox'
+    $button=Get-StopControl $win 'StartStopButton'
+    $result.room_code=Get-StopText $room;$result.player_id=Get-StopText $player;$result.task_id=Get-StopText $taskBox
+    $role=Normalize-StopLabel (Get-StopText $create);$joined=Normalize-StopLabel (Get-StopText $join)
+    $result.is_host=$create -and $create.Current.IsEnabled -and $role -in @('dong room','dong phong','close room','close')
+    if(-not $result.is_host -or $joined -notin @('roi room','roi phong','leave room','leave') -or
+       $result.room_code -cnotmatch '^[A-Z0-9]{6}$' -or -not $result.player_id -or
+       $result.task_id -cne $targetTask -or ($expectedRoom -and $result.room_code -cne $expectedRoom) -or
+       ($expectedPlayer -and $result.player_id -cne $expectedPlayer)) {
+        $result.status='wrong_identity';$result.error='STOP_HOST_ROOM_OR_TASK_CHANGED'
+    } elseif(-not $button -or $button.Current.ControlType -ne [System.Windows.Automation.ControlType]::Button) {
+        $result.error='STOP_BUTTON_UNAVAILABLE'
+    } else {
+        $result.button_state=Get-StopState $button.Current.Name;$result.status=$result.button_state
+        if($result.status -eq 'stop_action' -and -not $button.Current.IsEnabled) {$result.status='unavailable';$result.error='STOP_BUTTON_DISABLED'}
+        if($allowInvoke -and $result.status -eq 'stop_action') {
+            # The native room Host displays End round during armed/recording.
+            # Start/Ready/standalone Cancel controls are never a stop command.
+            $label=[string]$button.Current.Name;$runtime=$button.GetRuntimeId()
+            if((Get-StopState $button.Current.Name) -ne 'stop_action' -or -not $button.Current.IsEnabled -or
+               (Get-StopText $taskBox) -cne $targetTask) {throw 'STOP_STATE_CHANGED'}
+            $result.invoked=$true
+            [OdxLegacyReady]::Invoke($script:OdxTargetHwnd.ToInt64(),$script:OdxTargetPid,
+                $button.Current.AutomationId,$label,$runtime)
+            $result.status='invoked'
+        }
+    }
+} catch {$result.status='error';$result.error='STOP_UI_ACTION_FAILED'}
+Write-HostStopResult
+"""
+    script = (script.replace('__TARGET_TASK__', _ps_literal(str(task or '').strip()))
+              .replace('__EXPECTED_ROOM__', _ps_literal(str(expected_room or '')))
+              .replace('__EXPECTED_PLAYER__', _ps_literal(str(expected_player or '')))
+              .replace('__INVOKE__', '$true' if invoke else '$false')
+              .replace('__EXPECTED_HWND__', str(int(context[0])) if context else '0')
+              .replace('__EXPECTED_PID__', str(int(context[1])) if context else '0'))
+    return (ready_action_preamble() if invoke else '') + script
 
-    for attempt in range(max_retry):
+
+def _host_stop_report(result):
+    if result is None or result.returncode != 0:
+        return None
+    for line in reversed((result.stdout or '').splitlines()):
+        if line.startswith('ODX_HOST_STOP:'):
+            try:
+                report = json.loads(line.partition(':')[2])
+            except (TypeError, ValueError):
+                return None
+            if isinstance(report, dict) and report.get('status') in {
+                    'unavailable', 'wrong_identity', 'stop_action', 'invoked', 'ending', 'stopped', 'blocked', 'error'}:
+                return report
+    return None
+
+
+def stop_recording_verified(follower, active_task_id, hwnd=None, max_retry=4, timeout=None,
+                            allow_armed=False, can_stop=None, on_status=None):
+    """End this owned Host round once, without routing F10 through foreground.
+
+    Native Host/task identity and the live server session must agree before the
+    semantic End round button is invoked. Local recorder stop/kept logs alone
+    cannot prove the room ended. An uncertain dispatch is never repeated.
+    """
+    task = str(active_task_id or '').strip()
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', task):
+        return False
+
+    def notify(message, tag='WAIT'):
+        if on_status:
+            try:
+                on_status(message, tag)
+            except Exception:
+                pass
+
+    def allowed():
+        try:
+            return can_stop is None or bool(can_stop())
+        except Exception:
+            return False
+
+    def matching(value):
+        return isinstance(value, (tuple, list)) and len(value) >= 2 and str(value[0]).strip() == task
+
+    try:
+        seconds = max(1, float(timeout)) if timeout is not None else max(1, max_retry) * 1.5
+        if not math.isfinite(seconds):
+            return False
+    except (TypeError, ValueError):
+        return False
+    if not allowed():
+        return False
+    deadline = time.monotonic() + seconds
+    context, attempted, announced = None, False, False
+    while time.monotonic() < deadline:
+        if not allowed():
+            return False
         follower.check_new_lines()
-        if follower.current_stopped or follower.last_round_result:
+        recording = getattr(follower, 'current_recording', None)
+        armed = getattr(follower, 'last_armed', None)
+        stopped = getattr(follower, 'current_stopped', None)
+        result = getattr(follower, 'last_round_result', None)
+        if recording and recording != task:
+            return False
+        if (recording is None and not armed and matching(result)
+                and str(result[1]).strip().lower() not in ('', 'ok')):
+            # A room-final result is sufficient and must not issue another
+            # toggle or depend on a fresh HTTP request after completion.
+            notify(f'Odx đã xác nhận kết thúc round [{task}].', 'SUCCESS')
             return True
-
-        user32.keybd_event(VK_F10, scan_code, 0, 0)
-        time.sleep(0.05)
-        user32.keybd_event(VK_F10, scan_code, KEYEVENTF_KEYUP, 0)
-
-        w_start = time.time()
-        while time.time() - w_start < 1.5:
-            follower.check_new_lines()
-            if follower.current_stopped or follower.last_round_result:
-                return True
-            time.sleep(0.1)
+        known = recording == task or matching(stopped) or matching(result) or (allow_armed and armed == task)
+        if not known:
+            if not allow_armed:
+                return False
+            time.sleep(min(.1, max(0, deadline - time.monotonic())))
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if context is None:
+            context = _owned_uia_context(min(1, remaining))
+            if context is None or (hwnd is not None and int(hwnd) != context[0]):
+                notify('Không xác nhận được đúng cửa sổ Host Odx để kết thúc round.', 'ERROR')
+                return False
+            context = tuple(context)
+        if _owned_uia_context(0) != context:
+            return False
+        report = _host_stop_report(run_ps_script(
+            _host_stop_script(task, allow_armed, False, context), timeout=min(3, max(.01, remaining))))
+        if not allowed():
+            return False
+        if report and (report.get('hwnd') != context[0] or report.get('pid') != context[1]):
+            return False
+        if not report or report.get('status') == 'unavailable':
+            time.sleep(min(.1, max(0, deadline - time.monotonic())))
+            continue
+        if (report.get('status') in {'wrong_identity', 'blocked', 'error'} or not report.get('is_host') or
+                report.get('task_id') != task):
+            notify('Odx không ở đúng Host/task hoặc nút hiện tại không phải Kết thúc round; giữ nguyên Odx.', 'ERROR')
+            return False
+        room, identity = str(report.get('room_code') or ''), str(report.get('player_id') or '')
+        data = fetch_room_status(room)
+        if not allowed() or time.monotonic() >= deadline:
+            return False
+        if not isinstance(data, dict) or data.get('error'):
+            if not announced:
+                notify('Chưa xác nhận được máy chủ room; đang chờ để kết thúc đúng phiên Odx.', 'WAIT')
+                announced = True
+            time.sleep(min(.1, max(0, deadline - time.monotonic())))
+            continue
+        if str(data.get('host') or '') != identity:
+            return False
+        session = data.get('current_session')
+        if session:
+            server_task = session if isinstance(session, str) else next(
+                (session[key] for key in ('task', 'task_id', 'session_id') if isinstance(session, dict) and session.get(key)), None)
+            if server_task is not None and str(server_task) != task:
+                return False
+        local_ended = recording is None and (matching(stopped) or matching(result))
+        if session is None and (report['status'] in {'stopped', 'ending'} or local_ended):
+            notify(f'Odx đã xác nhận kết thúc round [{task}]; đang chờ lưu/kiểm định.', 'SUCCESS')
+            return True
+        if session and report['status'] == 'stop_action' and not attempted:
+            if not allowed() or _owned_uia_context(0) != context or time.monotonic() >= deadline:
+                return False
+            attempted = True  # Set before dispatch; a lost reply cannot toggle a new round.
+            response = _host_stop_report(run_ps_script(
+                _host_stop_script(task, allow_armed, True, context, expected_room=room, expected_player=identity),
+                timeout=min(5, max(.01, deadline - time.monotonic()))))
+            if response and (response.get('hwnd') != context[0] or response.get('pid') != context[1]):
+                return False
+            notify(f'Đã yêu cầu Kết thúc round một lần trên Odx [{task}]; chờ xác nhận dừng.', 'HOST')
+            if response and response.get('status') in {'wrong_identity', 'blocked', 'error'} and not response.get('invoked'):
+                return False
+        if not announced and (attempted or report['status'] == 'ending' or session is None):
+            notify('Đang chờ Odx kết thúc round; không gửi lại F10 và không đóng cửa sổ.', 'WAIT')
+            announced = True
+        time.sleep(min(.1, max(0, deadline - time.monotonic())))
+    notify(('Đã gửi lệnh nhưng chưa xác nhận Odx kết thúc round.' if attempted else
+            'Chưa gửi được lệnh Kết thúc round an toàn vào đúng Host Odx.') + ' Giữ nguyên Odx.', 'ERROR')
     return False
 
 # ======================================================================
 # LOG FOLLOWER
 # ======================================================================
+
+def _windows_command_line_arguments(command_line):
+    """Parse a native command line without evaluating any command text."""
+    from ctypes import wintypes
+    shell = ctypes.WinDLL("shell32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    shell.CommandLineToArgvW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    shell.CommandLineToArgvW.restype = ctypes.POINTER(wintypes.LPWSTR)
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    count = ctypes.c_int()
+    arguments = shell.CommandLineToArgvW(command_line, ctypes.byref(count))
+    if not arguments:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return [arguments[index] for index in range(count.value)]
+    finally:
+        kernel.LocalFree(arguments)
+
+
+def _query_performance_counter_ms():
+    """Read the same Windows QPC clock used by Odx's video grid origin."""
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.QueryPerformanceFrequency.argtypes = [ctypes.POINTER(ctypes.c_longlong)]
+    kernel.QueryPerformanceFrequency.restype = wintypes.BOOL
+    kernel.QueryPerformanceCounter.argtypes = [ctypes.POINTER(ctypes.c_longlong)]
+    kernel.QueryPerformanceCounter.restype = wintypes.BOOL
+    frequency, counter = ctypes.c_longlong(), ctypes.c_longlong()
+    if (not kernel.QueryPerformanceFrequency(ctypes.byref(frequency)) or frequency.value <= 0
+            or not kernel.QueryPerformanceCounter(ctypes.byref(counter))):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return counter.value * 1000.0 / frequency.value
+
+
+def _is_live_recorder_process(pid, expected_executable):
+    """Check the exact live process after taking a CIM command-line snapshot."""
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                                wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    kernel.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    process = kernel.OpenProcess(0x1000, False, pid)
+    if not process:
+        return False
+    try:
+        exit_code = wintypes.DWORD()
+        if not kernel.GetExitCodeProcess(process, ctypes.byref(exit_code)) or exit_code.value != 259:
+            return False
+        size = wintypes.DWORD(32768)
+        path = ctypes.create_unicode_buffer(size.value)
+        return bool(kernel.QueryFullProcessImageNameW(process, 0, path, ctypes.byref(size))
+                    and os.path.normcase(os.path.realpath(path.value)) == expected_executable)
+    finally:
+        kernel.CloseHandle(process)
+
+
+def get_recording_start_time(task_id):
+    """Return this owned recorder's true video start on Python's monotonic clock.
+
+    Odx logs ``recording ... into`` while its recorder is still preparing for
+    the room countdown. The live recorder command's NTP-aligned QPC grid origin
+    is its video start, including when that instant is still in the future.
+    Completed capture files are deliberately never used as live evidence.
+    Call this bounded read from a worker, not Tk's event thread.
+    """
+    task = str(task_id or "").strip()
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", task):
+        return None
+    try:
+        result = run_ps_script("""
+$recorders = @(Get-CimInstance Win32_Process -Filter "Name = 'odx.exe'" | ForEach-Object {
+    [PSCustomObject]@{pid=[int]$_.ProcessId; path=$_.ExecutablePath; command=$_.CommandLine}
+})
+ConvertTo-Json -InputObject $recorders -Compress
+""", timeout=4)
+        if not result or result.returncode != 0:
+            return None
+        records = json.loads(result.stdout.strip().lstrip("\ufeff"))
+        if not isinstance(records, list):
+            return None
+        expected_executable = os.path.normcase(os.path.realpath(os.path.join(ODX_ROOT, "bin", "odx.exe")))
+        expected_capture = os.path.normcase(os.path.realpath(os.path.join(ODX_ROOT, "data", "captures", task)))
+        origins = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            pid, executable, command = record.get("pid"), record.get("path"), record.get("command")
+            if (not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0
+                    or not isinstance(executable, str) or not isinstance(command, str)
+                    or os.path.normcase(os.path.realpath(executable)) != expected_executable
+                    or not _runtime.owns_pid(pid)
+                    or not _is_live_recorder_process(pid, expected_executable)):
+                continue
+            arguments = _windows_command_line_arguments(command)
+            if (len(arguments) < 2 or arguments[1].lower() != "record"
+                    or os.path.normcase(os.path.realpath(arguments[0])) != expected_executable
+                    or arguments.count("--out") != 1
+                    or arguments.count("--grid-origin-qpc-ms") != 1):
+                continue
+            output_index, origin_index = arguments.index("--out") + 1, arguments.index("--grid-origin-qpc-ms") + 1
+            if output_index >= len(arguments) or origin_index >= len(arguments):
+                continue
+            if os.path.normcase(os.path.realpath(arguments[output_index])) != expected_capture:
+                continue
+            try:
+                origin = float(arguments[origin_index])
+            except ValueError:
+                continue
+            if not math.isfinite(origin) or origin <= 0:
+                continue
+            # Reject an exited or replaced PID after reading its command line.
+            if _runtime.owns_pid(pid) and _is_live_recorder_process(pid, expected_executable):
+                origins.append(origin)
+        if len(origins) != 1:
+            return None
+        current_qpc_ms = _query_performance_counter_ms()
+        if not math.isfinite(current_qpc_ms):
+            return None
+        return time.monotonic() + (origins[0] - current_qpc_ms) / 1000.0
+    except (OSError, AttributeError, ValueError, TypeError, IndexError, ctypes.ArgumentError):
+        return None
+
+
+def _native_log_monotonic_time(line):
+    """Convert Odx's local log timestamp to monotonic time at observation."""
+    match = re.match(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{1,6})\s", line)
+    if not match:
+        return None
+    try:
+        epoch = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S.%f").timestamp()
+        return time.monotonic() + epoch - time.time()
+    except (OSError, OverflowError, ValueError):
+        return None
+
 def get_latest_log_path():
     log_dir = os.path.join(ODX_ROOT, "data", "logs")
     if not os.path.exists(log_dir):
@@ -1535,52 +2565,101 @@ def get_latest_log_path():
 
 class LiveLogFollower:
     def __init__(self, log_path=None):
+        self._read_lock = threading.RLock()
+        self._auto_log_path = not log_path
         self.log_path = log_path or get_latest_log_path()
         self.last_pos = 0
+        self._file_identity = None
+        self._anchor = b""
+        self._clear_state()
+        self.init_position()
+
+    def _clear_state(self):
         self.room_code = None
         self.last_armed = None
         self.current_recording = None
         self.current_stopped = None
+        self.current_stopped_at = None
         self.last_round_result = None
         self.last_all_ok = None
         self.last_kept_path = None
         self.id_conflict = None
         self.clock_drift_error = None
         self.task_in_use_error = None
-        self.init_position()
 
     def init_position(self):
-        if os.path.exists(self.log_path):
-            self.last_pos = os.path.getsize(self.log_path)
-        else:
-            self.last_pos = 0
-        self.room_code = None
+        self.reset_to_end()
 
     def reset_to_end(self):
-        if os.path.exists(self.log_path):
-            self.last_pos = os.path.getsize(self.log_path)
-        else:
+        with self._read_lock:
+            if self._auto_log_path:
+                self.log_path = get_latest_log_path()
+            self._clear_state()
             self.last_pos = 0
-        self.room_code = None
-        self.task_in_use_error = None
+            self._file_identity = None
+            self._anchor = b""
+            try:
+                with open(self.log_path, "rb") as log_file:
+                    stat = os.fstat(log_file.fileno())
+                    self._file_identity = (stat.st_dev, stat.st_ino)
+                    self.last_pos = stat.st_size
+                    log_file.seek(max(0, self.last_pos - 64))
+                    self._anchor = log_file.read(self.last_pos - log_file.tell())
+            except OSError:
+                pass
 
     def check_new_lines(self, from_start=False):
-        if not os.path.exists(self.log_path):
-            return []
+        with self._read_lock:
+            if from_start:
+                self.last_pos = 0
+                self._anchor = b""
+            lines = self._read_complete_lines()
+            if self._auto_log_path:
+                latest = get_latest_log_path()
+                if latest != self.log_path and os.path.exists(latest):
+                    # Drain the previous day's tail before following the new file.
+                    # Recording state intentionally survives daily log rotation.
+                    self.log_path = latest
+                    self.last_pos = 0
+                    self._file_identity = None
+                    self._anchor = b""
+                    lines.extend(self._read_complete_lines())
+            return lines
+
+    def _read_complete_lines(self):
         lines = []
         try:
-            with open(self.log_path, "r", encoding="utf-8", errors="ignore") as f:
-                if not from_start:
-                    f.seek(self.last_pos)
-                for line in f:
+            with open(self.log_path, "rb") as log_file:
+                stat = os.fstat(log_file.fileno())
+                identity = (stat.st_dev, stat.st_ino)
+                replaced = self._file_identity is not None and identity != self._file_identity
+                truncated = stat.st_size < self.last_pos
+                if not replaced and not truncated and self._anchor:
+                    log_file.seek(self.last_pos - len(self._anchor))
+                    truncated = log_file.read(len(self._anchor)) != self._anchor
+                if replaced or truncated:
+                    self.last_pos = 0
+                    self._anchor = b""
+                self._file_identity = identity
+                log_file.seek(self.last_pos)
+                data = log_file.read()
+                complete_length = data.rfind(b"\n") + 1
+                for raw_line in data[:complete_length].splitlines(keepends=True):
+                    line = raw_line.decode("utf-8", errors="replace")
                     self.parse_line(line)
                     lines.append(line.strip())
-                self.last_pos = f.tell()
-        except Exception:
+                    self.last_pos += len(raw_line)
+                log_file.seek(max(0, self.last_pos - 64))
+                self._anchor = log_file.read(self.last_pos - log_file.tell())
+        except OSError:
             pass
         return lines
 
     def parse_line(self, line):
+        with self._read_lock:
+            self._parse_line_unlocked(line)
+
+    def _parse_line_unlocked(self, line):
         m_room = re.search(r"in room ([A-Z0-9]{6})", line)
         if m_room:
             self.room_code = m_room.group(1).strip()
@@ -1593,16 +2672,32 @@ class LiveLogFollower:
         if m_rec:
             self.current_recording = m_rec.group(1).strip()
             self.current_stopped = None
+            self.current_stopped_at = None
 
         m_stop = re.search(r"stop (.*?) \((.*?)\)", line)
         if m_stop:
-            self.current_stopped = (m_stop.group(1).strip(), m_stop.group(2).strip())
-            self.current_recording = None
+            stopped_task = m_stop.group(1).strip()
+            # A late stop for an older task must not replace the newer active
+            # capture, but a matching terminal event also ends its armed flag.
+            if self.current_recording == stopped_task or (
+                    self.current_recording is None and self.last_armed in (None, stopped_task)):
+                self.current_stopped = (stopped_task, m_stop.group(2).strip())
+                self.current_stopped_at = _native_log_monotonic_time(line)
+            self._clear_terminal_capture_activity(stopped_task)
 
         m_kept = re.search(r"([a-zA-Z0-9_-]+) done: kept in (.*?); ok", line)
         if m_kept:
             self.last_round_result = (m_kept.group(1).strip(), "ok")
             self.last_kept_path = m_kept.group(2).strip()
+
+        m_cancelled = re.search(r"([a-zA-Z0-9_-]+): round cancelled, recording kept locally only \((.*)\)", line)
+        if m_cancelled:
+            cancelled_task = m_cancelled.group(1)
+            self.last_round_result = (cancelled_task, "cancelled")
+            self.last_kept_path = m_cancelled.group(2).strip()
+            self._clear_terminal_capture_activity(cancelled_task)
+            if self.last_all_ok == cancelled_task:
+                self.last_all_ok = None
 
         if "is in use on another machine" in line:
             self.id_conflict = line
@@ -1618,8 +2713,16 @@ class LiveLogFollower:
             t_name = m_done.group(1).strip()
             t_res = m_done.group(2).strip()
             self.last_round_result = (t_name, t_res)
+            self._clear_terminal_capture_activity(t_name)
             if "all ok" in t_res.lower():
                 self.last_all_ok = t_name
+
+    def _clear_terminal_capture_activity(self, task):
+        """Release only the activity ended by this task's terminal log event."""
+        if self.current_recording == task:
+            self.current_recording = None
+        if self.last_armed == task:
+            self.last_armed = None
 
 # ======================================================================
 # ROOM TRACKING VIA ORCHESTRATOR API
@@ -1628,21 +2731,30 @@ def fetch_room_status(room_code, orchestrator_url=ORCHESTRATOR_URL, access_key=A
     if not room_code:
         return None
     clean_code = str(room_code).strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{6}", clean_code):
+        return {"error": "INVALID_CODE", "message": "Room code must contain six ASCII letters or digits"}
     url = f"{orchestrator_url.rstrip('/')}/rooms/{clean_code}"
     headers = {"Authorization": f"Bearer {access_key}"}
     ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=2.5, context=ctx) as r:
-            return json.loads(r.read().decode("utf-8"))
+            data = json.loads(r.read().decode("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("Room status response must be a JSON object")
+            return data
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            return {"error": "NOT_FOUND", "status_code": 404}
-        return None
-    except Exception:
-        return None
+            return {"error": "NOT_FOUND", "status_code": 404, "message": "Room was not found"}
+        return {"error": "HTTP_ERROR", "status_code": e.code, "message": f"Room server returned HTTP {e.code}"}
+    except (ssl.SSLError, urllib.error.URLError) as e:
+        reason = getattr(e, "reason", e)
+        category = "TLS_ERROR" if isinstance(reason, ssl.SSLError) else "NETWORK_ERROR"
+        return {"error": category, "message": str(reason)}
+    except (ValueError, UnicodeError) as e:
+        return {"error": "INVALID_RESPONSE", "message": str(e)}
+    except (OSError, TimeoutError) as e:
+        return {"error": "NETWORK_ERROR", "message": str(e)}
 
 def format_member_table(room_code, host_id, members, max_expected=4):
     lines = []
@@ -1677,13 +2789,13 @@ def format_member_table(room_code, host_id, members, max_expected=4):
             
     lines.append("-" * 72)
     if total_cnt >= max_expected and ready_cnt >= max_expected:
-        lines.append("  >> TRANG THAI PHONG: DU 4 NGUOI SAN SANG 100% (READY) [OK]")
+        lines.append(f"  >> TRANG THAI PHONG: DU {max_expected} NGUOI SAN SANG 100% (READY) [OK]")
     else:
         lines.append(f"  >> DANG CHO: {ready_cnt}/{max_expected} nguoi choi san sang...")
     lines.append("=" * 72)
     return "\n".join(lines)
 
-def format_hud_roster(room_code, host_id, members):
+def format_hud_roster(room_code, host_id, members, expected=4):
     parts = []
     ready_cnt = sum(1 for idx, m in enumerate(members) if m.get("ready") or (str(m.get("player_id")) == str(host_id) or (idx == 0 and not host_id)))
     for idx, m in enumerate(members[:4]):
@@ -1695,19 +2807,22 @@ def format_hud_roster(room_code, host_id, members):
         parts.append(f"{name}{tag}({mark})")
     
     joined = " | ".join(parts) if parts else "Dang ket noi..."
-    return f"[{room_code}] {joined} [{ready_cnt}/4 READY]  [F10 TRONG GAME: BAT DAU]"
+    return f"[{room_code}] {joined} [{ready_cnt}/{expected} READY]  [F10: BAT DAU]"
 
 class RoomTracker:
-    def __init__(self, room_code, overlay=None, on_change_callback=None):
+    def __init__(self, room_code, overlay=None, on_change_callback=None, expected_players=4):
         self.room_code = str(room_code).strip().upper()
         self.overlay = overlay
         self.on_change_callback = on_change_callback
+        self.expected_players = expected_players
         self.latest_data = None
         self.last_sig = None
         self.is_running = False
         self.is_paused = False
         self.thread = None
         self.table_printed = False
+        self.last_error = None
+        self.last_success_at = None
 
     def start(self, interval=1.2):
         if self.is_running:
@@ -1727,14 +2842,20 @@ class RoomTracker:
         self._force_hud_update = True
 
     def is_all_ready(self, expected=4):
-        if not self.latest_data:
+        data = self.latest_data
+        last_success_at = self.last_success_at
+        if not data:
             return False
-        members = self.latest_data.get("members", [])
+        if last_success_at is None or time.monotonic() - last_success_at > 10:
+            return False
+        members = data.get("members", [])
         if len(members) < expected:
             return False
-        host_id = self.latest_data.get("host")
+        host_id = data.get("host")
         for idx, m in enumerate(members):
             is_h = (str(m.get("player_id")) == str(host_id)) or (idx == 0 and not host_id)
+            if m.get("problem"):
+                return False
             if not is_h and not m.get("ready"):
                 return False
         return True
@@ -1743,8 +2864,12 @@ class RoomTracker:
         while self.is_running:
             try:
                 data = fetch_room_status(self.room_code)
-                if data and "members" in data:
+                if not self.is_running:
+                    break
+                if data and isinstance(data.get("members"), list):
                     self.latest_data = data
+                    self.last_error = None
+                    self.last_success_at = time.monotonic()
                     host_id = data.get("host")
                     members = data.get("members", [])
                     
@@ -1753,12 +2878,12 @@ class RoomTracker:
                     if sig_changed:
                         self.last_sig = sig
                         if not self.table_printed:
-                            print("\n" + format_member_table(self.room_code, host_id, members))
+                            print("\n" + format_member_table(self.room_code, host_id, members, self.expected_players))
                             self.table_printed = True
                         else:
                             ready_cnt = sum(1 for idx, m in enumerate(members) if m.get("ready") or (str(m.get("player_id")) == str(host_id) or (idx == 0 and not host_id)))
                             m_sum = " | ".join(f"{m.get('name') or m.get('player_id')}:{'✓' if (m.get('ready') or str(m.get('player_id'))==str(host_id) or idx==0) else '..'}" for idx, m in enumerate(members[:4]))
-                            sys.stdout.write(f"\r>> [REAL-TIME PHONG {self.room_code}] ({ready_cnt}/4 SAN SANG) [{m_sum}]  ")
+                            sys.stdout.write(f"\r>> [REAL-TIME PHONG {self.room_code}] ({ready_cnt}/{self.expected_players} SAN SANG) [{m_sum}]  ")
                             sys.stdout.flush()
 
                         if self.on_change_callback:
@@ -1771,123 +2896,50 @@ class RoomTracker:
                     if not self.is_paused and self.overlay:
                         if sig_changed or getattr(self, "_force_hud_update", False):
                             self._force_hud_update = False
-                            hud_text = format_hud_roster(self.room_code, host_id, members)
-                            all_ready = self.is_all_ready(4)
+                            hud_text = format_hud_roster(self.room_code, host_id, members, self.expected_players)
+                            all_ready = self.is_all_ready(self.expected_players)
                             fg = "#A7F3D0" if all_ready else "#FCD34D"
-                            self.overlay.show_roster_hud(hud_text, fg)
-            except Exception:
-                pass
+                            self.overlay.show_roster_hud(hud_text, fg, roster=True)
+                else:
+                    message = (data.get("message") or data.get("error")) if isinstance(data, dict) else None
+                    self._invalidate_status(message or "Room status unavailable")
+            except Exception as e:
+                self._invalidate_status(str(e))
             time.sleep(interval)
+
+    def _invalidate_status(self, message):
+        """A failed request cannot leave an old green Ready roster active."""
+        message = str(message)
+        changed = self.last_error != message or self.latest_data is not None
+        self.latest_data = None
+        self.last_success_at = None
+        self.last_error = message
+        self.last_sig = None
+        if changed:
+            log_event("ROOM_STATUS_ERROR", level="WARN", source="ROOM", data={"room_code": self.room_code, "message": message})
+            if self.on_change_callback:
+                try:
+                    self.on_change_callback(self.room_code, None, [])
+                except Exception:
+                    pass
+            if self.overlay and not self.is_paused:
+                self.overlay.show_roster_hud(f"[{self.room_code}] KHONG DOC DUOC TRANG THAI PHONG: {message}", "#EF4444")
 
 # ======================================================================
 # AUTO-HEAL CAMERA NULLS & VALIDATION ENGINE
 # ======================================================================
 def heal_camera_nulls_if_needed(target_path):
-    csv_path = os.path.join(target_path, "frames.csv")
-    if not os.path.exists(csv_path):
-        return False
-    try:
-        import pandas as pd
-        import numpy as np
-        df = pd.read_csv(csv_path, keep_default_na=False)
-        c2w_cols = [c for c in df.columns if c.startswith("camera_c2w_matrix_")]
-        if not c2w_cols:
-            return False
+    """Explicit repair with preservation of original data; never called by validation."""
+    from odx_validation import heal_camera_nulls_if_needed as repair
+    return repair(target_path)
 
-        has_sparse_nulls = False
-        for c in c2w_cols:
-            series = df[c].astype(str)
-            null_count = (series == "null").sum() + (series == "").sum()
-            if 0 < null_count < len(df):
-                has_sparse_nulls = True
-                break
 
-        if has_sparse_nulls:
-            for c in c2w_cols:
-                series = df[c].astype(str).replace({"null": np.nan, "": np.nan})
-                series = series.ffill().bfill().fillna("0.0")
-                df[c] = series.apply(lambda x: "null" if pd.isna(x) else str(x))
-            df.to_csv(csv_path, index=False)
-            return True
-    except Exception:
-        pass
-    return False
+def validate_and_inspect_capture(target_path, is_room_mode=True, on_message=None):
+    from odx_validation import validate_and_inspect_capture as validate
+    return validate(target_path, is_room_mode=is_room_mode, odx_root=ODX_ROOT, on_message=on_message)
 
-def validate_and_inspect_capture(target_path, is_room_mode=True):
-    print("\n" + "=" * 72)
-    print(f"  [KIEM DINH TONG THE] Thu muc: [{os.path.basename(target_path)}]")
-    print(f"  Duong dan: {target_path}")
-    print("-" * 72)
 
-    heal_camera_nulls_if_needed(target_path)
-
-    odx_bin = os.path.join(ODX_ROOT, "bin", "odx.exe")
-    val_pass = False
-    if os.path.exists(odx_bin):
-        try:
-            res = subprocess.run([odx_bin, "validate", target_path], capture_output=True, text=True, timeout=30)
-            val_out = (res.stdout + "\n" + res.stderr).strip()
-            print("  [KET QUA ODX VALIDATE]:")
-            for line in val_out.splitlines():
-                if "PASS" in line or "error" in line.lower() or "warning" in line.lower():
-                    print(f"    {line.strip()}")
-            val_pass = ("PASS" in val_out) or (res.returncode == 0)
-        except Exception as e:
-            print(f"  [!] Khong the chay 'odx validate': {e}")
-    else:
-        print("  [!] Khong tim thay 'bin/odx.exe' de chay validate truc tiep.")
-
-    required_files = [
-        "video.mp4", "frames.csv", "frames_bin.bin",
-        "player.json", "session.json", "key_bindings.json",
-        os.path.join("raw", "input_events.csv")
-    ]
-    if is_room_mode:
-        required_files.append("events.jsonl")
-
-    missing_required = []
-    print("-" * 72)
-    print("  [KIEM TRA CAC FILE BAT BUOC CHUAN ADMIN]:")
-    for rf in required_files:
-        p = os.path.join(target_path, rf)
-        if os.path.exists(p) and os.path.getsize(p) > 0:
-            sz_str = f"{os.path.getsize(p) / 1024:.1f} KB" if os.path.getsize(p) < 1024*1024 else f"{os.path.getsize(p)/(1024*1024):.2f} MB"
-            print(f"    [+] {rf:<26} : CO MAT ({sz_str}) [OK]")
-        else:
-            print(f"    [-] {rf:<26} : THIEU HOAC RONG (0 byte)! [LOI]")
-            missing_required.append(rf)
-
-    # Role Chuot Check
-    allowed_mouse_btns = {"left", "right", "middle", "scroll", "none", "null", "wheel"}
-    disallowed_mouse_used = set()
-    raw_csv_p = os.path.join(target_path, "raw", "input_events.csv")
-    if os.path.exists(raw_csv_p):
-        try:
-            import csv
-            with open(raw_csv_p, "r", encoding="utf-8", errors="ignore") as f:
-                r = csv.DictReader(f)
-                for row in r:
-                    kind = row.get("kind", "").lower()
-                    val = row.get("value", "").strip()
-                    if ("button" in kind or "mouse" in kind) and val and kind != "mouse_move":
-                        if val.lower() not in allowed_mouse_btns:
-                            disallowed_mouse_used.add(val)
-        except Exception:
-            pass
-
-    mouse_role_pass = (len(disallowed_mouse_used) == 0)
-    print("-" * 72)
-    if mouse_role_pass:
-        print("  [+] Role Chuot (Mouse Role)       : HOP LE [OK] (Chi dung Chuot Trai, Phai, Con lan)")
-    else:
-        dis_list = ", ".join(sorted(list(disallowed_mouse_used)))
-        print(f"  [!] VI PHAM ROLE CHUOT            : Phat hien nut chuot khong duoc phep: [{dis_list}]!")
-
-    print("-" * 72)
-    is_fully_pass = (len(missing_required) == 0 and val_pass and mouse_role_pass)
-    if is_fully_pass:
-        print("  ==> KET QUA TONG THE: DAT CHUAN ADMIN 100% (DAY DU 8 FILE & ROLE HOP LE) [OK]")
-    else:
-        print("  ==> [!] CANH BAO: CHUA DAT CHUAN ADMIN DAY DU!")
-    print("=" * 72)
-    return is_fully_pass
+def validate_finalized_capture(task_id, follower, should_continue=None, on_message=None):
+    from odx_validation import validate_finalized_capture as validate
+    return validate(task_id, follower, odx_root=ODX_ROOT,
+                    should_continue=should_continue, on_message=on_message)

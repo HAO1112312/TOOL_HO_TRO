@@ -19,3 +19,5 @@ Tool_Tu_Dong/
 PUSH_LEN_GITHUB.bat
 README.md
 !Tool_Tu_Dong.zip
+
+!tests/test_*.py

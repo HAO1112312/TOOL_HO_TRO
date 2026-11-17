@@ -1,0 +1,22 @@
+BẢN CẬP NHẬT 3.2.11 - CHỜ FILE VÀ AUTO READY TRÊN PLAYER
+
+Áp dụng trên Host và tất cả Player/VM:
+1. Sau khi task hiện tại kết thúc, đóng Tool rồi giải nén gói cập nhật
+   chép đè vào thư mục Tool_Tu_Dong hiện có trên từng máy.
+2. Mở lại CHAY_TOOL_AUTO_PILOT.bat. Tiêu đề phải hiện v3.2.11.
+3. Chọn task mới hoặc -fix chưa tồn tại. Không xóa hay ghi đè capture cũ.
+
+Sửa lỗi:
+- Không kiểm định ngay khi chỉ mới thấy events.jsonl. Chờ Odx báo lưu xong
+  đúng task, đủ file bắt buộc không rỗng và không thay đổi tối thiểu 1 giây.
+- Dùng đường dẫn capture thực tế Odx báo lưu trên mỗi máy.
+- Chờ/thử lại trong 90 giây khi file chưa đủ, chưa ghi xong hoặc tạm bị khóa.
+  File thay đổi trong lúc kiểm định sẽ được kiểm tra lại.
+- Player tự bật Ready sau kiểm định thành công, khi room đã kết thúc.
+- Nếu dữ liệu vẫn lỗi, báo rõ file/lý do và cho KIỂM ĐỊNH LẠI ngay tại phòng;
+  không bỏ qua kiểm định bằng cách tự kết nối lại.
+- Worker kiểm định cũ ngừng khi đổi lượt/kết nối hoặc đóng Tool.
+
+Gói chỉ chứa mã nguồn/launcher/hướng dẫn/kiểm thử; không chứa Odx hoặc dữ liệu
+người dùng. Giữ thư mục Odx, cấu hình và capture hiện có trên từng máy.
+Odx được giữ mở khi lỗi, dừng, kiểm định hoặc thử lại. Chỉ đóng theo khi đóng Tool.
