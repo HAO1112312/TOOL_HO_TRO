@@ -21,3 +21,10 @@ README.md
 !Tool_Tu_Dong.zip
 
 !tests/test_*.py
+
+# Local development artifacts and per-machine runtime state.
+_backups/
+Tool_Tu_Dong_v*_CAP_NHAT.zip
+autopilot_progress.json
+autopilot_ui.json
+odx_capture_test_restore.json
