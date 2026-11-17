@@ -103,7 +103,7 @@ def inspect_input_data(target_path):
 
 
 def _native_report(stdout, target_path):
-    """Parse odx 0.3.5 `validate --json`: an object mapping capture paths to issues."""
+    """Parse native `validate --json`: an object mapping capture paths to issues."""
     report = json.loads(stdout)
     if not isinstance(report, dict) or len(report) != 1:
         raise ValueError("ODX report must be an object keyed by capture path")

@@ -68,6 +68,25 @@ def _version_for_root(path):
     return (0, 0, 0, 0)
 
 
+def _roots_at_package(path):
+    """Accept a root or one extra extraction wrapper named odx-capture*.
+
+    ZIPs may contain their own versioned directory. Restrict the extra lookup
+    to package directories; never recurse through backups, captures or Downloads.
+    """
+    if _is_odx_root(path):
+        return [path]
+    if not re.match(r"(?i)^odx[-_]capture(?:[-_].*)?$", path.name):
+        return []
+    try:
+        roots = [child for child in path.iterdir() if child.is_dir() and _is_odx_root(child)]
+        roots.sort(key=lambda candidate: str(candidate).casefold())
+        roots.sort(key=_version_for_root, reverse=True)
+        return roots
+    except (OSError, ValueError):
+        return []
+
+
 def find_all_odx_roots(tool_dir=None):
     """Return valid roots in precedence order, without scanning Downloads."""
     here = Path(tool_dir or Path(__file__).parent).resolve()
@@ -79,24 +98,29 @@ def find_all_odx_roots(tool_dir=None):
             seen.add(key)
             result.append((_version_for_root(path), str(path)))
 
+    def add_package(path):
+        for candidate in _roots_at_package(path):
+            add(candidate)
+
     explicit = os.environ.get("ODX_ROOT")
     if explicit:
         try:
-            add(_normalise_root(explicit, here))
+            add_package(_normalise_root(explicit, here))
         except (OSError, ValueError, TypeError):
             pass
     try:
         config = json.loads((here / "autopilot_config.json").read_text(encoding="utf-8-sig"))
         configured = config.get("odx_root") or config.get("ODX_ROOT")
         if configured:
-            add(_normalise_root(configured, here))
+            add_package(_normalise_root(configured, here))
     except (OSError, ValueError, TypeError, AttributeError):
         pass
 
     for base in (here, here.parent):
         add(base)
         try:
-            children = [p for p in base.iterdir() if p.is_dir() and _is_odx_root(p)]
+            children = [root for child in base.iterdir() if child.is_dir()
+                        for root in _roots_at_package(child)]
             children.sort(key=lambda p: str(p).casefold())
             children.sort(key=_version_for_root, reverse=True)
             for child in children:

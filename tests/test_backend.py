@@ -29,6 +29,20 @@ class ImmediateThread:
 
 
 class BackendTests(unittest.TestCase):
+    def test_version_badge_reads_the_selected_nested_install(self):
+        root = os.path.join("selected", "odx-capture-0.3.8-win-x64", "odx-capture-0.3.8-win-x64")
+        expected = os.path.join(root, "bin", "odx-app.exe")
+        with patch.object(backend, "get_odx_root", return_value=root), \
+             patch.object(backend.os.path, "exists", side_effect=lambda path: path == expected), \
+             patch.object(backend, "get_odx_file_version", return_value=(0, 3, 8, 0)) as version:
+            self.assertEqual(backend.get_odx_version_display(), "v0.3.8")
+        version.assert_called_once_with(expected)
+
+    def test_missing_install_never_claims_old_odx_version(self):
+        with patch.object(backend, "get_odx_root", return_value="missing-install"), \
+             patch.object(backend.os.path, "exists", return_value=False):
+            self.assertEqual(backend.get_odx_version_display(), "chưa xác định")
+
     def test_import_has_no_process_or_handler_side_effects(self):
         with patch("atexit.register") as register, patch("subprocess.run") as run, patch.object(backend._runtime, "setup_process_protection") as protection:
             importlib.reload(backend)

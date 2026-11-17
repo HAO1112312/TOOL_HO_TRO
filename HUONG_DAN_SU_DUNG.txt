@@ -1,9 +1,12 @@
 ========================================================================
-     HƯỚNG DẪN SỬ DỤNG BỘ TOOL TỰ ĐỘNG HÓA ODX CAPTURE (v3.2.13)
+     HƯỚNG DẪN SỬ DỤNG BỘ TOOL TỰ ĐỘNG HÓA ODX CAPTURE (v3.2.14)
              GIAO DIỆN HIỆN ĐẠI (STUDIO UX/UI) & BACKEND ĐỒNG BỘ
 ========================================================================
 
 ⭐ BƯỚC 1: CÀI ĐẶT
+- Hỗ trợ nhận diện Odx 0.3.8 khi ZIP giải nén thành hai thư mục cùng tên,
+  ví dụ odx-capture-0.3.8-win-x64/odx-capture-0.3.8-win-x64/bin/odx.exe.
+  Tool chọn đúng thư mục trong cùng, ưu tiên bản hợp lệ mới nhất trong bộ tool.
 - F10 gửi yêu cầu dừng ngay khi nhấn xuống, không đợi nhả phím hoặc hàng đợi
   giao diện. Giữ phím không lặp lệnh; nhả phím không bật quay lại.
 - Chuẩn bị sẵn bộ xử lý dừng từ lúc Odx đếm ngược và giữ suốt round,
@@ -13,7 +16,7 @@
 - F10 dùng nhận diện native đã chuẩn bị, xác minh lại trực tiếp cửa sổ và
   nút Kết thúc đúng Host/room/task trước khi gọi. Không chờ API trên đường
   phát lệnh; xác nhận kết thúc/lưu/kiểm định vẫn theo Odx và server.
-- Sau cập nhật phải mở lại tool và kiểm tra tiêu đề v3.2.13. Thay file trên
+- Sau cập nhật phải mở lại tool và kiểm tra tiêu đề v3.2.14. Thay file trên
   đĩa không thay phiên Python đang chạy; bản đang mở vẫn dùng mã lúc khởi động.
 - HUD và đồng hồ Host/Player dùng chung cách hiển thị phần mười giây.
   Player dùng cùng mẫu thời gian cho HUD và giao diện, kể cả khi VM cập nhật chậm.
@@ -46,8 +49,10 @@
   https://www.python.org/downloads/windows/ ; bật Tcl/Tk và Add Python to PATH.
   Python đã cài nhưng Tkinter lỗi: dùng Modify/Repair để bổ sung Tcl/Tk,
   không dùng pip install tkinter.
-- Giữ nguyên thư mục 'odx-capture-0.3.5-win-x64' đi kèm bộ tool.
-  Tool tự tìm Odx trong thư mục hiện tại, thư mục con hoặc thư mục cha.
+- Giữ nguyên toàn bộ gói Odx do admin cấp, hiện tại là odx-capture-0.3.8-win-x64.
+  Tool tự tìm Odx trong thư mục hiện tại, thư mục con hoặc thư mục cha;
+  hỗ trợ thêm một lớp thư mục bọc của ZIP, không quét sâu vào dữ liệu/backup.
+  Cập nhật Online của tool không tải hoặc thay thế bộ Odx/native hay capture.
   Có thể chọn bản cài riêng bằng khóa 'odx_root' trong autopilot_config.json.
 
 ------------------------------------------------------------------------
@@ -116,7 +121,7 @@
 ------------------------------------------------------------------------
 ⭐ ĐỒNG BỘ CẤU HÌNH HOST–PLAYER
 ------------------------------------------------------------------------
-- Cập nhật cùng bản 3.2.13 trên Host và mọi Player; giữ đủ các file đi kèm bộ tool.
+- Cập nhật cùng bản 3.2.14 trên Host và mọi Player; giữ đủ các file đi kèm bộ tool.
 - Host là nguồn chung cho mã task, thời lượng đã random, quy tắc random, số máy,
   thời gian nghỉ, tiến trình round và các lựa chọn hiển thị HUD.
 - Các ô thời lượng/random/nghỉ/số máy và các dấu chọn HUD trên Host được truyền

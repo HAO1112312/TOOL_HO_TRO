@@ -60,7 +60,7 @@ def get_odx_version_display():
     m = re.search(r"0\.\d+\.\d+", root)
     if m:
         return f"v{m.group(0)}"
-    return "v0.3.5"
+    return "chưa xác định"
 
 ODX_ROOT = get_odx_root()
 

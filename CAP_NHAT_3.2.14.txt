@@ -1,0 +1,16 @@
+ODX AUTO-PILOT 3.2.14 - NHẬN DIỆN ODX 0.3.8
+
+- Sửa trường hợp gói ZIP tạo hai thư mục odx-capture-0.3.8-win-x64 lồng nhau.
+  Tool tự chọn thư mục trong cùng chứa bin/odx-app.exe, bin/odx.exe và data.
+- Tìm thêm đúng một lớp thư mục bọc có tên odx-capture*, không quét sâu vào
+  backup/captures hay toàn bộ Downloads. Ưu tiên bản mới nhất trong bộ tool;
+  vẫn giữ ưu tiên đường dẫn môi trường/cấu hình được chọn rõ ràng.
+- Không còn báo mặc định v0.3.5 nếu chưa xác định được bản Odx.
+- Đã đối chiếu CLI record/QPC/stop-event, validate --json, các tên control và
+  mẫu log của 0.3.8; parser và giao tiếp hiện tại vẫn tương ứng.
+- Không thay đổi native config, capture, tiến độ hoặc đóng cửa sổ Odx.
+  Giữ các sửa lỗi F10/Ready/kiểm định của 3.2.13.
+
+Cập nhật Online trên Host và Player, mở lại Tool rồi kiểm tra tiêu đề v3.2.14
+và badge Odx v0.3.8. Gói này chỉ cập nhật Tool; bộ Odx 0.3.8 do admin cấp
+cần được giải nén đầy đủ trên từng máy. Chưa xác nhận một round thật trên 4 máy.

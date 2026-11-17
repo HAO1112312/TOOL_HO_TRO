@@ -29,6 +29,49 @@ class RootDiscoveryTests(unittest.TestCase):
         bundled = self.root(self.tool / "odx-capture-0.3.5-win-x64")
         self.assertEqual(runtime.resolve_odx_root(self.tool), bundled)
 
+    def test_release_zip_with_same_named_nested_folder_is_discovered(self):
+        name = "odx-capture-0.3.8-win-x64"
+        bundled = self.root(self.tool / name / name)
+        self.assertEqual(runtime.resolve_odx_root(self.tool), bundled)
+
+    def test_nested_new_release_beats_direct_older_local_package(self):
+        self.root(self.tool / "odx-capture-0.3.5-win-x64")
+        name = "odx-capture-0.3.8-win-x64"
+        bundled = self.root(self.tool / name / name)
+        self.assertEqual(runtime.resolve_odx_root(self.tool), bundled)
+
+    def test_nested_local_package_still_beats_parent_sibling(self):
+        name = "odx-capture-0.3.8-win-x64"
+        bundled = self.root(self.tool / name / name)
+        self.root(self.base / "odx-capture-9.9.9")
+        self.assertEqual(runtime.resolve_odx_root(self.tool), bundled)
+
+    def test_explicit_environment_accepts_extraction_wrapper(self):
+        wrapper = self.base / "odx-capture-0.3.8-win-x64"
+        native = self.root(wrapper / wrapper.name)
+        self.root(self.tool / "odx-capture-9.9.9")
+        with patch.dict(os.environ, {"ODX_ROOT": str(wrapper)}):
+            self.assertEqual(runtime.resolve_odx_root(self.tool), native)
+
+    def test_relative_config_accepts_extraction_wrapper(self):
+        wrapper = self.tool / "odx-capture-0.3.8-win-x64"
+        native = self.root(wrapper / wrapper.name)
+        (self.tool / "autopilot_config.json").write_text(json.dumps({"odx_root": wrapper.name}))
+        self.assertEqual(runtime.resolve_odx_root(self.tool), native)
+
+    def test_package_inside_backup_is_not_auto_selected(self):
+        self.root(self.tool / "_backups" / "odx-capture-9.9.9")
+        self.assertEqual(runtime.resolve_odx_root(self.tool), str(self.tool.resolve()))
+
+    def test_package_lookup_does_not_recurse_beyond_one_wrapper(self):
+        self.root(self.tool / "odx-capture-0.3.8" / "outer" / "inner")
+        self.assertEqual(runtime.resolve_odx_root(self.tool), str(self.tool.resolve()))
+
+    def test_invalid_nested_package_falls_back_to_valid_old_install(self):
+        (self.tool / "odx-capture-0.3.8" / "odx-capture-0.3.8").mkdir(parents=True)
+        old = self.root(self.tool / "odx-capture-0.3.5")
+        self.assertEqual(runtime.resolve_odx_root(self.tool), old)
+
     def test_local_direct_root_wins_over_newer_sibling(self):
         direct = self.root(self.tool)
         self.root(self.base / "odx-capture-9.9.9")
