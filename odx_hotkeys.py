@@ -12,6 +12,27 @@ from ctypes import wintypes
 WH_KEYBOARD_LL = 13
 
 
+def route_physical_hotkey(pressed, message, key, *, injected=False,
+                         should_capture, dispatch):
+    """Consume an owned press and dispatch it on its first key-down only.
+
+    Key-up never schedules work. A held key's repeat messages cannot start a
+    second stop/start operation; unrelated and injected keys retain their
+    normal hook chain behavior.
+    """
+    if not should_capture(key, injected):
+        return False
+    if message in (0x0100, 0x0104):  # WM_KEYDOWN / WM_SYSKEYDOWN
+        if key not in pressed:
+            pressed.add(key)
+            dispatch(key)
+        return True
+    if message in (0x0101, 0x0105):  # WM_KEYUP / WM_SYSKEYUP
+        pressed.discard(key)
+        return True
+    return False
+
+
 def replace_keyboard_hook(api, callback, module, old_handle):
     """Return the replacement handle, or None while retaining the old hook.
 

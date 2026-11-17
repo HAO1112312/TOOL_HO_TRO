@@ -33,13 +33,11 @@ class ClockAlignmentGuiTests(unittest.TestCase):
         self.gui._prepared_host_stop_attempted = True
         return job
 
-    def test_preparation_only_starts_once_in_last_eight_seconds_without_stopping(self):
+    def test_preparation_starts_at_round_beginning_once_without_stopping(self):
         self.recording()
         job = types.SimpleNamespace(claim=Mock(return_value=False), cancel=Mock())
         self.backend.prepare_recording_stop = Mock(return_value=job)
-        self.gui.prepare_host_stop_if_needed(231.999)
-        self.backend.prepare_recording_stop.assert_not_called()
-        for elapsed in (232, 233, 239.999, 240):
+        for elapsed in (0, 1, 100, 232, 233, 239.999, 240):
             self.gui.prepare_host_stop_if_needed(elapsed)
         self.backend.prepare_recording_stop.assert_called_once()
         self.backend.stop_recording_verified.assert_not_called()
@@ -119,7 +117,7 @@ class ClockAlignmentGuiTests(unittest.TestCase):
                 self.assertIsNone(self.gui._prepared_host_stop)
 
     def test_new_recording_cancels_previous_preparation(self):
-        job = self.warm_job()
+        job = self.warm_job(key=(-1, self.gui.active_task_id))
         with patch.object(time, "monotonic", return_value=101):
             self.gui.begin_confirmed_recording(self.gui.active_task_id, 100)
         job.cancel.assert_called_once()

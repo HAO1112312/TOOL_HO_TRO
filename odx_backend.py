@@ -2433,6 +2433,9 @@ class PreparedRecordingStop:
         self._transport = None
         self.context = None
         self._snapshot = None
+        self._native_snapshot = None
+        self._native_identity = None
+        self._native_only = False
         self._claimed = self._cancelled = self._dispatched = False
         threading.Thread(target=self._prepare, daemon=True).start()
 
@@ -2442,9 +2445,22 @@ class PreparedRecordingStop:
         except Exception:
             return False
 
-    def _fresh_locked(self):
-        return (not self._cancelled and not self._dispatched and self._snapshot is not None
-                and self._transport is not None and self._transport.alive
+    def _same_capture_active(self):
+        recording = getattr(self.follower, 'current_recording', None)
+        armed = getattr(self.follower, 'last_armed', None)
+        return recording in (None, self.task) and (recording == self.task or armed == self.task)
+
+    def _fresh_locked(self, native_only=None):
+        if (self._cancelled or self._dispatched or self._transport is None
+                or not self._transport.alive):
+            return False
+        use_native = self._native_only if native_only is None else native_only
+        if use_native:
+            # An explicit physical stop may use its same-capture native preflight
+            # while HTTP is slow. The exact controls are re-read by the warm
+            # process at commit, using the pinned room/player/task identity.
+            return self._native_snapshot is not None and self._same_capture_active()
+        return (self._snapshot is not None
                 and 0 <= time.monotonic() - self._snapshot['observed_at'] <= self.MAX_AGE)
 
     @property
@@ -2452,11 +2468,12 @@ class PreparedRecordingStop:
         with self._state_lock:
             return self._fresh_locked()
 
-    def claim(self):
+    def claim(self, native_only=False):
         # UI callers never wait for a subprocess, request or preparation thread.
         with self._state_lock:
-            if self._claimed or not self._fresh_locked():
+            if self._claimed or not self._fresh_locked(native_only=bool(native_only)):
                 return False
+            self._native_only = bool(native_only)
             self._claimed = True
             self._stop_refresh.set()
             return True
@@ -2483,14 +2500,22 @@ class PreparedRecordingStop:
             transport = self._transport
         self._close_transport(transport)
 
-    def _accept_snapshot(self, report, data, observed_at):
-        if (not isinstance(report, dict) or not isinstance(data, dict) or data.get('error')
-                or report.get('status') != 'stop_action' or not report.get('is_host')
+    def _accept_native_snapshot(self, report, observed_at):
+        if (not isinstance(report, dict) or report.get('status') != 'stop_action' or not report.get('is_host')
                 or (report.get('hwnd'), report.get('pid')) != self.context
                 or report.get('task_id') != self.task
                 or not re.fullmatch(r'[A-Z0-9]{6}', str(report.get('room_code') or ''))
-                or not str(report.get('player_id') or '')
-                or str(data.get('host') or '') != str(report.get('player_id'))):
+                or not str(report.get('player_id') or '')):
+            return None
+        identity = report['room_code'], str(report['player_id'])
+        if self._native_identity is not None and self._native_identity != identity:
+            return None
+        return dict(observed_at=observed_at, room=identity[0], player=identity[1])
+
+    def _accept_snapshot(self, report, data, observed_at):
+        native = self._accept_native_snapshot(report, observed_at)
+        if (native is None or not isinstance(data, dict) or data.get('error')
+                or str(data.get('host') or '') != native['player']):
             return None
         session = data.get('current_session')
         server_task = session if isinstance(session, str) else next(
@@ -2498,7 +2523,7 @@ class PreparedRecordingStop:
              if isinstance(session, dict) and session.get(key)), None)
         if str(server_task or '') != self.task:
             return None
-        return dict(observed_at=observed_at, room=report['room_code'], player=str(report['player_id']))
+        return native
 
     def _prepare(self):
         try:
@@ -2525,6 +2550,16 @@ class PreparedRecordingStop:
                 report = transport.request('probe', timeout=2.5 if first else .4)
                 first = False
                 observed_at = time.monotonic()
+                native = self._accept_native_snapshot(report, observed_at)
+                with self._state_lock:
+                    if self._claimed or self._cancelled:
+                        return
+                    if native is not None and self._native_identity is None:
+                        self._native_identity = native['room'], native['player']
+                    # A read timeout retains a valid same-capture cache. A real
+                    # response with changed identity/role/state invalidates it.
+                    if isinstance(report, dict):
+                        self._native_snapshot = native
                 data = fetch_room_status(str(report.get('room_code') or '')) if isinstance(report, dict) else None
                 snapshot = self._accept_snapshot(report, data, observed_at)
                 with self._state_lock:
@@ -2550,7 +2585,8 @@ class PreparedRecordingStop:
             if (not self._claimed or not self._fresh_locked() or task != self.task
                     or (hwnd is not None and int(hwnd) != self.hwnd)):
                 return False, None, None
-            snapshot, transport, context = dict(self._snapshot), self._transport, self.context
+            snapshot = dict(self._native_snapshot if self._native_only else self._snapshot)
+            transport, context = self._transport, self.context
         try:
             if not can_stop() or _owned_uia_context(0) != context:
                 return False, None, None

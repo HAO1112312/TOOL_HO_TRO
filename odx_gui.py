@@ -28,7 +28,7 @@ import odx_backend as be
 from odx_overlay import OdxOverlay
 from odx_sync import HostSettingsServer, PlayerSettingsClient
 from odx_window import WindowPreferences
-from odx_hotkeys import replace_keyboard_hook
+from odx_hotkeys import replace_keyboard_hook, route_physical_hotkey
 from odx_timing import format_elapsed, format_recording_clock
 
 try:
@@ -2174,7 +2174,8 @@ class OdxAutoPilotGUI:
     def begin_confirmed_recording(self, task_id, started_at=None):
         if self.is_recording:
             return
-        self.cancel_prepared_host_stop()
+        if getattr(self, "_prepared_host_stop_key", None) != (self._transition_token, task_id):
+            self.cancel_prepared_host_stop()
         self._round_test_mode = bool(getattr(self, "_room_test_mode", False))
         anchor = time.monotonic() if started_at is None else float(started_at)
         self._round_start_epoch = time.time() + anchor - time.monotonic()
@@ -2187,6 +2188,7 @@ class OdxAutoPilotGUI:
             self.is_counting_down = True
             self.rec_start_time = 0
             self.show_host_pending_clock(task_id, anchor)
+            self.prepare_host_stop_if_needed(0)
             return
         self._scheduled_start_at = None
         self._scheduled_start_task = ""
@@ -2201,6 +2203,7 @@ class OdxAutoPilotGUI:
             self.tracker.pause_hud()
         self.lbl_host_status.config(text=f"● ĐANG QUAY [{task_id}] - F10: DỪNG KHẨN CẤP", fg=ModernTheme.ACCENT_GREEN)
         self.log(f"Odx đã xác nhận bắt đầu task [{task_id}].", "RECORD")
+        self.prepare_host_stop_if_needed(0)
 
     def show_host_pending_clock(self, task_id, anchor=None):
         remaining = max(0, anchor - time.monotonic()) if anchor is not None else None
@@ -2229,10 +2232,10 @@ class OdxAutoPilotGUI:
                 pass
 
     def prepare_host_stop_if_needed(self, elapsed):
-        # Prepare native accessibility and server checks while recording still
-        # has time left. Preparation never invokes End round or blocks F10.
-        if (not self.is_recording or self.is_stopping
-                or not max(0, self.target_duration - 8) <= elapsed < self.target_duration
+        # Keep the native stop action warm from the countdown onward so F10
+        # can stop at any point in the round, including well before its target.
+        if (not (self.is_recording or self.is_counting_down) or self.is_stopping
+                or not 0 <= elapsed < self.target_duration
                 or getattr(self, "_prepared_host_stop_attempted", False)):
             return
         self._prepared_host_stop_attempted = True
@@ -2247,7 +2250,7 @@ class OdxAutoPilotGUI:
         def current():
             return (self.is_running and self.current_mode == "HOST"
                     and self._transition_token == token and self.active_task_id == task
-                    and self.is_recording and not self.is_stopping
+                    and (self.is_recording or self.is_counting_down) and not self.is_stopping
                     and self.follower.current_recording == task)
         try:
             self._prepared_host_stop = prepare(self.follower, task, hwnd=hwnd,
@@ -2256,12 +2259,13 @@ class OdxAutoPilotGUI:
         except Exception as exc:
             self.log(f"Chưa chuẩn bị được lệnh dừng [{task}]: {exc}; vẫn xác minh khi đủ giờ.", "WARN")
 
-    def take_prepared_host_stop(self, task):
+    def take_prepared_host_stop(self, task, native_only=False):
         prepared = getattr(self, "_prepared_host_stop", None)
         key = getattr(self, "_prepared_host_stop_key", None)
         if prepared is not None and key == (self._transition_token, task):
             try:
-                if prepared.claim():
+                claimed = prepared.claim(native_only=True) if native_only else prepared.claim()
+                if claimed:
                     self._prepared_host_stop = None
                     self._prepared_host_stop_key = None
                     return prepared
@@ -2308,12 +2312,12 @@ class OdxAutoPilotGUI:
             time.sleep(0.1)
         return False
 
-    def request_host_stop(self, action):
-        if self.is_stopping:
-            return
-        task_id = self.active_task_id
-        prepared = self.take_prepared_host_stop(task_id)
+    def request_host_stop(self, action, received_at=None):
         with self._action_lock:
+            if self.is_stopping:
+                return
+            task_id = self.active_task_id
+            prepared = self.take_prepared_host_stop(task_id, native_only=received_at is not None or action == "emergency")
             preparing_without_capture = self.is_counting_down and not self._start_command_sent and not self.follower.current_recording
             allow_armed = self._start_command_sent
             self._transition_token += 1
@@ -2323,17 +2327,27 @@ class OdxAutoPilotGUI:
             self._pending_stop_action = action
             self._pending_stop_task = task_id
             self._stop_elapsed = self.capture_elapsed()
+            received_elapsed = (max(0, received_at - self.rec_start_time)
+                                if received_at is not None and self.rec_start_time > 0 else self._stop_elapsed)
             self._scheduled_start_at = None
             self._scheduled_start_task = ""
         if preparing_without_capture:
-            self.finish_host_stop(token, task_id, True, action)
+            if prepared is not None:
+                prepared.cancel()
+            self.post_ui(self.finish_host_stop, token, task_id, True, action)
             return
-        self.btn_host_start.config(state="disabled")
-        self.btn_host_emergency.config(state="disabled")
-        self.set_task_controls_enabled(False)
-        stop_label = "ĐANG DỪNG KHẨN CẤP" if action == "emergency" else "ĐANG KẾT THÚC"
-        self.lbl_host_status.config(text=f"{stop_label} [{task_id}] - CHỜ ODX...", fg=ModernTheme.ACCENT_AMBER)
-        self.log(f"Yêu cầu kết thúc [{task_id}] trực tiếp trên cửa sổ Odx Host; chờ xác nhận dừng.", "WAIT")
+
+        def display_request():
+            if not self.is_running or token != self._transition_token:
+                return
+            self.btn_host_start.config(state="disabled")
+            self.btn_host_emergency.config(state="disabled")
+            self.set_task_controls_enabled(False)
+            stop_label = "ĐANG DỪNG KHẨN CẤP" if action == "emergency" else "ĐANG KẾT THÚC"
+            self.lbl_host_status.config(text=f"{stop_label} [{task_id}] - CHỜ ODX...", fg=ModernTheme.ACCENT_AMBER)
+            path = "đã chuẩn bị sẵn" if prepared is not None else "đang khởi tạo"
+            self.log(f"Yêu cầu kết thúc [{task_id}]; bộ xử lý {path}; mốc nhận lệnh {received_elapsed:.3f}s.", "WAIT")
+        self.post_ui(display_request)
 
         def on_status(message, tag="WAIT"):
             def display():
@@ -2365,7 +2379,10 @@ class OdxAutoPilotGUI:
                 self.post_ui(self.finish_host_stop, token, task_id, False, action)
             finally:
                 if prepared is not None:
-                    prepared.cancel()
+                    try:
+                        prepared.cancel()
+                    except Exception:
+                        pass
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -3316,15 +3333,12 @@ class OdxAutoPilotGUI:
                 try:
                     if code >= 0:
                         key = ctypes.cast(pointer, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-                        if self.should_capture_hotkey(key.vkCode, bool(key.flags & 0x10)):
-                            if message in (0x0100, 0x0104):
-                                pressed.add(key.vkCode)
-                                return 1
-                            if message in (0x0101, 0x0105):
-                                if key.vkCode in pressed:
-                                    pressed.discard(key.vkCode)
-                                    self.ui_queue.put((self.handle_host_hotkey, (key.vkCode,), {}))
-                                return 1
+                        if route_physical_hotkey(
+                                pressed, message, key.vkCode,
+                                injected=bool(key.flags & 0x10),
+                                should_capture=self.should_capture_hotkey,
+                                dispatch=self.queue_host_hotkey):
+                            return 1
                 except Exception:
                     pass
                 return api.CallNextHookEx(hook, code, message, pointer)
@@ -3396,6 +3410,46 @@ class OdxAutoPilotGUI:
     def hotkey_install_failed(self, error):
         self.log(f"Không cài được bộ bảo vệ phím nóng: {error}", "ERROR")
         messagebox.showerror("Lỗi phím nóng", "Không thể chặn phím F10/F11 của Odx. Chế độ Host sẽ chưa được mở. Hãy khởi động lại tool cùng quyền với Odx.")
+
+    def queue_host_hotkey(self, key):
+        """Dispatch a recording's F10 immediately; Tk only renders its state.
+
+        Low-level hook callbacks must never wait for native I/O or access Tk.
+        The stop worker verifies and invokes the prepared native action while
+        an unresponsive/busy UI catches up through its normal queue.
+        """
+        try:
+            if key == 0x79 and self.is_running and self.current_mode == "HOST" and self.odx_opened:
+                if (self.is_stopping or self.is_validating or self.is_updating
+                        or self.capture_state_unknown or self._stop_confirmation_failed):
+                    return
+                if self.is_recording or self.is_counting_down:
+                    # Never wait for the start/action lock inside a Windows
+                    # low-level hook. Capture the exact round, then reserve its
+                    # stop on a dedicated worker before any Tk queue work.
+                    threading.Thread(target=self.dispatch_recording_stop_hotkey,
+                                     args=(self._transition_token, self.active_task_id, time.monotonic()),
+                                     daemon=True).start()
+                    return
+            self.post_ui(self.handle_host_hotkey, key)
+        except Exception as exc:
+            # The hook must still consume this captured key if dispatch fails;
+            # leaking it to Odx could toggle a different/previous task.
+            self.post_ui(self.log, f"Không chuyển được phím tới tool: {exc}", "ERROR")
+
+    def dispatch_recording_stop_hotkey(self, token, task, received_at):
+        with self._action_lock:
+            if (not self.is_running or self.current_mode != "HOST" or not self.odx_opened
+                    or token != self._transition_token or task != self.active_task_id
+                    or not (self.is_recording or self.is_counting_down)
+                    or self.is_stopping or self.is_validating or self.is_updating
+                    or self.capture_state_unknown or self._stop_confirmation_failed):
+                return
+            self.is_in_cooldown = False
+            key_elapsed = max(0, received_at - self.rec_start_time) if self.rec_start_time > 0 else 0
+            action = ("emergency" if self.is_counting_down or key_elapsed < self.target_duration
+                      else "validate")
+            self.request_host_stop(action, received_at=received_at)
 
     def handle_host_hotkey(self, key):
         if self.current_mode != "HOST":

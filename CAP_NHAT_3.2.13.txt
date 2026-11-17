@@ -1,0 +1,22 @@
+ODX AUTO-PILOT 3.2.13 - F10 NHẤN LÀ GỬI DỪNG
+
+- F10 xử lý ở lần nhấn xuống đầu tiên, không chờ nhả phím. Giữ phím hoặc
+  nhả phím không gửi lặp lệnh và không bật quay lại.
+- Khi đang quay/đếm ngược, đưa lệnh tới worker dừng riêng ngay, không chờ
+  giao diện Tk cập nhật. Hook không chờ API, thao tác cửa sổ hoặc khóa xử lý.
+- Chuẩn bị bộ xử lý native ngay từ countdown và giữ suốt round, không còn
+  chỉ chuẩn bị trong 8 giây cuối. Dừng sớm cũng dùng lệnh đã chuẩn bị.
+- F10 dùng nhận diện native đã xác minh, kiểm tra lại đúng cửa sổ/Host/room/
+  Player/task/nút Kết thúc ngay khi thực thi; không đợi API để phát lệnh.
+  Xác nhận round kết thúc, lưu và kiểm định vẫn theo Odx/server.
+- Phân loại dừng sớm theo thời điểm nhấn F10, kể cả worker chạy qua deadline.
+- Log cho biết lệnh dùng bộ xử lý chuẩn bị sẵn hay phải khởi tạo và thời điểm
+  nhận phím so với mốc bắt đầu ghi thật, để đo độ trễ thực tế.
+
+Đã thấy Host còn mở v3.2.11 dù file trên đĩa mới hơn. Sau khi round kết thúc,
+đóng tool và mở lại; tiêu đề phải hiện v3.2.13. Trên Player/VM cũng cập nhật
+Online rồi mở lại. Chỉ đóng Odx theo khi bạn đóng tool; không tự khởi động lại
+phiên đang quay, không xóa/chỉnh sửa capture và không ép thời lượng giả.
+
+Gửi lệnh sớm nhất có thể; xử lý của Windows/Odx/mạng vẫn có độ trễ, không
+cam kết dừng tức thời 0 ms hoặc giống tuyệt đối từng frame trên mọi máy.

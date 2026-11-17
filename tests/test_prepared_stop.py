@@ -144,6 +144,87 @@ class PreparedStopStateTests(unittest.TestCase):
                        {'current_session': {'task': 'other'}}, {'error': 'NETWORK_ERROR'}):
             self.assertIsNone(self.job._accept_snapshot(self.report(), dict(server, **fields), 10))
 
+    def native_cache(self, *, recording='round-01', armed=None):
+        self.job.follower.current_recording = recording
+        self.job.follower.last_armed = armed
+        self.job._native_snapshot = self.job._accept_native_snapshot(self.report(), 10)
+        self.job._native_identity = ('ABC123', 'host')
+
+    def test_manual_native_claim_can_dispatch_while_server_snapshot_is_unavailable(self):
+        self.native_cache()
+        self.job._snapshot = None
+        self.now = 100
+        self.assertFalse(self.job.ready)
+        self.assertFalse(self.job.claim(), 'Automatic deadline still requires fresh server preflight')
+        self.assertTrue(self.job.claim(native_only=True))
+        self.transport.request.return_value = self.report(status='invoked', invoked=True)
+        attempted, response, _ = self.job.dispatch_once('round-01', 123, lambda: True, 30)
+        self.assertTrue(attempted)
+        self.assertTrue(response['invoked'])
+        self.api.assert_not_called()
+        self.transport.request.assert_called_once_with('invoke', room='ABC123', player='host', timeout=1.5)
+
+    def test_manual_native_claim_rejects_old_or_different_capture_proof(self):
+        for recording, armed in [(None, None), ('other-task', None), ('other-task', 'round-01')]:
+            with self.subTest(recording=recording, armed=armed):
+                self.native_cache(recording=recording, armed=armed)
+                self.assertFalse(self.job.claim(native_only=True))
+        self.transport.request.assert_not_called()
+
+    def test_manual_native_claim_accepts_same_armed_capture_and_rechecks_before_dispatch(self):
+        self.native_cache(recording=None, armed='round-01')
+        self.job._snapshot = None
+        self.assertTrue(self.job.claim(native_only=True))
+        self.job.follower.last_armed = None
+        self.assertFalse(self.job.dispatch_once('round-01', 123, lambda: True, 30)[0])
+        self.transport.request.assert_not_called()
+
+    def test_manual_native_dispatch_still_rejects_owner_change_and_stop_guard(self):
+        self.native_cache()
+        self.assertTrue(self.job.claim(native_only=True))
+        self.assertFalse(self.job.dispatch_once('round-01', 123, lambda: False, 30)[0])
+        self.native.return_value = (999, 888)
+        self.assertFalse(self.job.dispatch_once('round-01', 123, lambda: True, 30)[0])
+        self.transport.request.assert_not_called()
+
+    def test_native_cache_cannot_move_to_another_room_or_player(self):
+        self.native_cache()
+        for fields in ({'room_code': 'XYZ789'}, {'player_id': 'new-host'},
+                       {'task_id': 'other-task'}, {'is_host': False}, {'status': 'stopped'}):
+            with self.subTest(fields=fields):
+                self.assertIsNone(self.job._accept_native_snapshot(self.report(**fields), 100))
+
+    def test_manual_native_claim_is_blocked_for_missing_cache_dead_or_cancelled_helper(self):
+        self.native_cache()
+        self.job._native_snapshot = None
+        self.assertFalse(self.job.claim(native_only=True))
+        self.native_cache()
+        self.transport.alive = False
+        self.assertFalse(self.job.claim(native_only=True))
+        self.transport.alive = True
+        self.job.cancel()
+        self.assertFalse(self.job.claim(native_only=True))
+
+    def test_native_cache_is_published_before_a_slow_http_check(self):
+        self.native_cache()
+        self.job._native_snapshot = None
+        self.job._native_identity = None
+        self.job._snapshot = None
+        self.transport.request.return_value = self.report()
+        observations = []
+        def slow_http(*args, **kwargs):
+            observations.append(self.job._native_snapshot is not None)
+            observations.append(self.job.claim(native_only=True))
+            self.now = 100
+            return {'error': 'TIMEOUT'}
+        self.api.side_effect = slow_http
+        with patch.object(backend, '_PreparedStopProcess', return_value=self.transport):
+            self.job._prepare()
+        self.assertEqual(observations, [True, True])
+        self.assertFalse(self.job._cancelled, 'A claimed F10 handoff survives preparation callback exit')
+        self.assertTrue(self.job.ready)
+        self.transport.close.assert_not_called()
+
 
 class PreparedStopTransactionTests(unittest.TestCase):
     setUp = verified_fixture.VerifiedHostStopTests.setUp
@@ -228,6 +309,48 @@ class PreparedStopTransactionTests(unittest.TestCase):
 @unittest.skipUnless(os.name == 'nt', 'Windows WPF/UIAutomation')
 class PreparedStopNativeTests(unittest.TestCase):
     fixture = native_fixture.BackgroundHostStopNativeTests.fixture
+
+    def test_manual_native_handoff_dispatches_while_preparation_http_is_blocked(self):
+        with self.fixture(language='en', mode='minimized') as (_, context, read_state, _):
+            entered_http, release_http = threading.Event(), threading.Event()
+            follower = types.SimpleNamespace(current_recording=native_fixture.TASK,
+                last_armed=None, current_stopped=None, last_round_result=None)
+
+            def follow():
+                if read_state()['ended']:
+                    follower.current_recording = None
+                    follower.current_stopped = (native_fixture.TASK, 'round_end')
+                    follower.last_round_result = (native_fixture.TASK, 'all ok')
+
+            follower.check_new_lines = follow
+
+            def room(*args, **kwargs):
+                if not entered_http.is_set():
+                    entered_http.set()
+                    release_http.wait(5)
+                    return {'error': 'TIMEOUT'}
+                return dict(host='HOST_TEST', current_session=(
+                    None if read_state()['ended'] else {'task': native_fixture.TASK}))
+
+            with patch.object(backend, 'fetch_room_status', side_effect=room):
+                job = backend.prepare_recording_stop(follower, native_fixture.TASK, context[0],
+                                                     can_prepare=lambda: True)
+                try:
+                    self.assertTrue(entered_http.wait(8), 'Native preflight must precede the slow HTTP request')
+                    self.assertFalse(job.ready)
+                    self.assertFalse(job.claim())
+                    self.assertTrue(job.claim(native_only=True))
+                    self.assertTrue(backend.stop_recording_verified(
+                        follower, native_fixture.TASK, hwnd=context[0], timeout=8,
+                        can_stop=lambda: True, prepared=job))
+                    self.assertFalse(release_http.is_set(), 'Native action must not wait for the held HTTP reply')
+                    self.assertEqual(read_state()['clicks'], 1)
+                    self.assertTrue(read_state()['ended'])
+                finally:
+                    release_http.set()
+                    job.cancel()
+                    if job._transport is not None:
+                        job._transport.process.wait(timeout=3)
 
     def test_factory_refresh_handoff_and_stop_confirmation_use_same_warm_worker(self):
         with self.fixture(language='en', mode='offscreen') as (_, context, read_state, _):
