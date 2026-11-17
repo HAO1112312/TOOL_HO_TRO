@@ -47,6 +47,22 @@ class ValidationTests(unittest.TestCase):
         self.assertFalse(passed)
         self.assertIn("video.mp4", output)
 
+    def test_saved_duration_uses_native_session_without_modifying_it(self):
+        path = self.capture / "session.json"
+        original = b'{"duration_seconds":241.3,"frame_count":7239,"fps":30}'
+        path.write_bytes(original)
+        self.assertEqual(validation.capture_duration_seconds(self.capture), 241.3)
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_unavailable_or_invalid_saved_duration_never_invents_a_clock(self):
+        path = self.capture / "session.json"
+        for value in (None, True, "241.3", -1, 0, float("nan"), float("inf")):
+            with self.subTest(value=value):
+                path.write_text(json.dumps({"duration_seconds": value}), encoding="utf-8")
+                self.assertIsNone(validation.capture_duration_seconds(self.capture))
+        path.write_bytes(b"partially written JSON")
+        self.assertIsNone(validation.capture_duration_seconds(self.capture))
+
     def test_nonzero_exit_cannot_pass_even_without_reported_errors(self):
         self.assertFalse(self.audit(returncode=1)[0])
 

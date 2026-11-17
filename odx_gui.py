@@ -29,6 +29,7 @@ from odx_overlay import OdxOverlay
 from odx_sync import HostSettingsServer, PlayerSettingsClient
 from odx_window import WindowPreferences
 from odx_hotkeys import replace_keyboard_hook
+from odx_timing import format_elapsed, format_recording_clock
 
 try:
     from odx_logger import log_event, export_debug_logs
@@ -80,6 +81,9 @@ class OdxAutoPilotGUI:
         self._scheduled_start_at = None
         self._scheduled_start_task = ""
         self._stop_elapsed = None
+        self._prepared_host_stop = None
+        self._prepared_host_stop_key = None
+        self._prepared_host_stop_attempted = False
         self.target_duration = 240
         self.active_task_id = ""
         self.room_code = ""
@@ -1329,6 +1333,7 @@ class OdxAutoPilotGUI:
                 and not self.is_connecting)
 
     def select_task_id(self, task_id):
+        self.cancel_prepared_host_stop()
         self.task_id_override = task_id
         self.active_task_id = task_id
         batch = self.combo_batch.get().strip()
@@ -2169,6 +2174,7 @@ class OdxAutoPilotGUI:
     def begin_confirmed_recording(self, task_id, started_at=None):
         if self.is_recording:
             return
+        self.cancel_prepared_host_stop()
         self._round_test_mode = bool(getattr(self, "_room_test_mode", False))
         anchor = time.monotonic() if started_at is None else float(started_at)
         self._round_start_epoch = time.time() + anchor - time.monotonic()
@@ -2205,9 +2211,64 @@ class OdxAutoPilotGUI:
     def capture_elapsed(self):
         if self.rec_start_time <= 0:
             return 0.0
-        stop_at = getattr(self.follower, "current_stopped_at", None)
+        stopped = getattr(self.follower, "current_stopped", None)
+        stop_at = (getattr(self.follower, "current_stopped_at", None)
+                   if stopped and stopped[0] == self.active_task_id else None)
         end = stop_at if stop_at is not None else time.monotonic()
         return max(0.0, end - self.rec_start_time)
+
+    def cancel_prepared_host_stop(self):
+        prepared = getattr(self, "_prepared_host_stop", None)
+        self._prepared_host_stop = None
+        self._prepared_host_stop_key = None
+        self._prepared_host_stop_attempted = False
+        if prepared is not None:
+            try:
+                prepared.cancel()
+            except Exception:
+                pass
+
+    def prepare_host_stop_if_needed(self, elapsed):
+        # Prepare native accessibility and server checks while recording still
+        # has time left. Preparation never invokes End round or blocks F10.
+        if (not self.is_recording or self.is_stopping
+                or not max(0, self.target_duration - 8) <= elapsed < self.target_duration
+                or getattr(self, "_prepared_host_stop_attempted", False)):
+            return
+        self._prepared_host_stop_attempted = True
+        prepare = getattr(be, "prepare_recording_stop", None)
+        if prepare is None:
+            return
+        task, token = self.active_task_id, self._transition_token
+        hwnd = self.owned_odx_window()
+        if not hwnd:
+            return
+
+        def current():
+            return (self.is_running and self.current_mode == "HOST"
+                    and self._transition_token == token and self.active_task_id == task
+                    and self.is_recording and not self.is_stopping
+                    and self.follower.current_recording == task)
+        try:
+            self._prepared_host_stop = prepare(self.follower, task, hwnd=hwnd,
+                                              can_prepare=current)
+            self._prepared_host_stop_key = (token, task)
+        except Exception as exc:
+            self.log(f"Chưa chuẩn bị được lệnh dừng [{task}]: {exc}; vẫn xác minh khi đủ giờ.", "WARN")
+
+    def take_prepared_host_stop(self, task):
+        prepared = getattr(self, "_prepared_host_stop", None)
+        key = getattr(self, "_prepared_host_stop_key", None)
+        if prepared is not None and key == (self._transition_token, task):
+            try:
+                if prepared.claim():
+                    self._prepared_host_stop = None
+                    self._prepared_host_stop_key = None
+                    return prepared
+            except Exception:
+                pass
+        self.cancel_prepared_host_stop()
+        return None
 
     def host_trigger_emergency_stop(self):
         if self.current_mode != "HOST" or not self.odx_opened:
@@ -2251,6 +2312,7 @@ class OdxAutoPilotGUI:
         if self.is_stopping:
             return
         task_id = self.active_task_id
+        prepared = self.take_prepared_host_stop(task_id)
         with self._action_lock:
             preparing_without_capture = self.is_counting_down and not self._start_command_sent and not self.follower.current_recording
             allow_armed = self._start_command_sent
@@ -2289,16 +2351,21 @@ class OdxAutoPilotGUI:
                 if not hwnd:
                     ok = False
                 else:
+                    stop_options = {"prepared": prepared} if prepared is not None else {}
                     ok = be.stop_recording_verified(
                         self.follower, task_id, hwnd=hwnd, timeout=30, allow_armed=allow_armed,
                         can_stop=lambda: (self.is_running and token == self._transition_token
-                                          and self.owned_odx_window() == hwnd), on_status=on_status)
+                                          and self.owned_odx_window() == hwnd), on_status=on_status,
+                        **stop_options)
                 if ok and action in ("emergency", "reset", "close"):
                     ok = self.wait_capture_finished(task_id)
                 self.post_ui(self.finish_host_stop, token, task_id, bool(ok), action)
             except Exception as exc:
                 self.log(f"Lỗi khi dừng Odx: {exc}", "ERROR")
                 self.post_ui(self.finish_host_stop, token, task_id, False, action)
+            finally:
+                if prepared is not None:
+                    prepared.cancel()
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -2314,6 +2381,8 @@ class OdxAutoPilotGUI:
             self.lbl_host_status.config(text="CHƯA XÁC NHẬN KẾT THÚC - HÃY KIỂM TRA ODX", fg=ModernTheme.ACCENT_RED)
             self.log("Chưa xác nhận Odx kết thúc; giữ nguyên task và thời gian, không lặp lệnh có thể bật quay lại. Odx được giữ mở.", "ERROR")
             return
+        self.cancel_prepared_host_stop()
+        final_elapsed = self.capture_elapsed()
         self.is_recording = False
         self._stop_confirmation_failed = False
         self.is_counting_down = False
@@ -2329,7 +2398,7 @@ class OdxAutoPilotGUI:
         self.follower.current_stopped = None
         self.follower.last_armed = None
         self.overlay.clear()
-        self.lbl_timer.config(text="00:00 / 04:00 (±5s)")
+        self.lbl_timer.config(text=format_recording_clock(final_elapsed, self.target_duration))
         self.btn_host_emergency.config(state="disabled")
         if self.tracker:
             self.tracker.resume_hud()
@@ -2362,6 +2431,7 @@ class OdxAutoPilotGUI:
     def reset_host_task(self):
         if self.is_recording or self.is_counting_down or self.is_stopping:
             return
+        self.cancel_prepared_host_stop()
         self._transition_token += 1
         self.is_in_cooldown = False
         self.abort_state = None
@@ -2428,6 +2498,7 @@ class OdxAutoPilotGUI:
         if token is None:
             token = self._transition_token
         is_pass, all_ok, error = False, False, None
+        duration_seconds = None
         try:
             audit = be.validate_finalized_capture(
                 task_id, self.follower,
@@ -2436,6 +2507,7 @@ class OdxAutoPilotGUI:
             if audit.cancelled or not self.is_running or token != self._transition_token:
                 return
             is_pass, error = audit.passed, audit.error or None
+            duration_seconds = getattr(audit, "duration_seconds", None)
             deadline = time.monotonic() + 15
             while self.is_running and token == self._transition_token and time.monotonic() < deadline:
                 self.follower.check_new_lines()
@@ -2449,13 +2521,19 @@ class OdxAutoPilotGUI:
                 time.sleep(0.2)
         except Exception as exc:
             error = str(exc)
-        self.post_ui(self.finish_validation, token, task_id, is_pass, all_ok, error)
+        if duration_seconds is None:
+            self.post_ui(self.finish_validation, token, task_id, is_pass, all_ok, error)
+        else:
+            self.post_ui(self.finish_validation, token, task_id, is_pass, all_ok, error, duration_seconds)
 
-    def finish_validation(self, token, task_id, is_pass, all_ok, error):
+    def finish_validation(self, token, task_id, is_pass, all_ok, error, duration_seconds=None):
         if token != self._transition_token or not self.is_running:
             return
         if (token, task_id) in self._completed_validation_tokens:
             return
+        if duration_seconds is not None:
+            self.lbl_timer.config(text=format_recording_clock(duration_seconds, self.target_duration))
+            self.log(f"Thời lượng video Odx đã lưu [{task_id}]: {duration_seconds:.3f}s.", "RECORD")
         self.is_validating = False
         self.set_task_controls_enabled(True)
         self.btn_host_start.config(state="normal")
@@ -2897,6 +2975,8 @@ class OdxAutoPilotGUI:
                 self.cancel_player_ready(cancel_connection=True)
                 stop_at = getattr(self.follower, "current_stopped_at", None)
                 elapsed = max(0, (stop_at if stop_at is not None else time.monotonic()) - started) if started is not None else 0
+                if started is not None:
+                    self.post_ui(self.player_clock_state, generation, task, started, True, elapsed)
                 cancelled = elapsed < self.round_target_duration(task) or bool(
                     stopped and stopped[0] == task and any(word in str(stopped[1]).lower() for word in ("cancel", "abort")))
                 recording, preparing = False, False
@@ -2928,7 +3008,7 @@ class OdxAutoPilotGUI:
             if recording:
                 elapsed = time.monotonic() - started
                 self.overlay.update_recording(task, elapsed, target, blink=(int(elapsed) % 2 == 0), is_host=False)
-                self.post_ui(self.player_clock_state, generation, task, started, True)
+                self.post_ui(self.player_clock_state, generation, task, started, True, elapsed)
                 if elapsed > target + 10 and not warned_timeout:
                     warned_timeout = True
                     self.log("Chưa nhận xác nhận dừng từ Host; chưa tự đánh dấu hoàn tất hoặc bật Ready.", "WARN")
@@ -2941,7 +3021,7 @@ class OdxAutoPilotGUI:
                         self.post_ui(self.auto_ready_player_next_round)
             time.sleep(0.2)
 
-    def player_clock_state(self, generation, task, started_at, recording):
+    def player_clock_state(self, generation, task, started_at, recording, elapsed_snapshot=None):
         if generation != self._player_connection_generation:
             return
         label = getattr(self, "lbl_p_timer", None)
@@ -2950,11 +3030,9 @@ class OdxAutoPilotGUI:
         if not recording or started_at is None:
             label.config(text="CHỜ ODX GHI THẬT")
             return
-        elapsed = max(0, time.monotonic() - started_at)
+        elapsed = max(0, time.monotonic() - started_at) if elapsed_snapshot is None else elapsed_snapshot
         target = self.round_target_duration(task)
-        m, s = divmod(int(elapsed), 60)
-        tm, ts = divmod(target, 60)
-        label.config(text=f"{task}: {m:02d}:{s:02d} / {tm:02d}:{ts:02d}")
+        label.config(text=f"{task}: {format_recording_clock(elapsed, target)}")
 
     def player_countdown_state(self, generation, task):
         if generation == self._player_connection_generation and not self.is_player_recording:
@@ -3016,20 +3094,22 @@ class OdxAutoPilotGUI:
         if not current():
             return
         ok, error = False, ""
+        duration_seconds = None
         try:
             audit = be.validate_finalized_capture(task, self.follower, should_continue=current,
                                                 on_message=lambda line: self.log(line, "AUDIT"))
             if audit.cancelled or not current():
                 return
             ok, error = audit.passed, audit.error
+            duration_seconds = getattr(audit, "duration_seconds", None)
             self.log(f"Kiểm định máy con [{'PASS' if ok else 'FAIL'}]: [{task}]", "SUCCESS" if ok else "WARN")
         except Exception as exc:
             error = str(exc)
             self.log(f"Kiểm định máy con lỗi: {exc}", "ERROR")
         if current():
-            self.post_ui(self.finish_player_validation, generation, task, round_token, bool(ok), False, error)
+            self.post_ui(self.finish_player_validation, generation, task, round_token, bool(ok), False, error, duration_seconds)
 
-    def finish_player_validation(self, generation, task, round_token, ok, cancelled=False, error=""):
+    def finish_player_validation(self, generation, task, round_token, ok, cancelled=False, error="", duration_seconds=None):
         if (generation != self._player_connection_generation or
                 self._player_validation_token != (generation, task, round_token) or
                 self._player_round_token != round_token):
@@ -3037,6 +3117,9 @@ class OdxAutoPilotGUI:
         self.is_validating = False
         self._player_validation_token = None
         self._player_validation_failed = not ok
+        if duration_seconds is not None:
+            self.lbl_p_timer.config(text=f"{task}: {format_recording_clock(duration_seconds, self.round_target_duration(task))}")
+            self.log(f"Thời lượng video Odx đã lưu [{task}]: {duration_seconds:.3f}s.", "RECORD")
         if ok:
             self._player_failed_audit = None
             self._player_ready_after_round = (generation, round_token, task)
@@ -3419,9 +3502,7 @@ class OdxAutoPilotGUI:
                     self.show_host_pending_clock(self.active_task_id, anchor)
         if self.is_recording and self.rec_start_time > 0:
             elapsed = self.capture_elapsed()
-            minutes, seconds = divmod(int(elapsed), 60)
-            target_min, target_sec = divmod(self.target_duration, 60)
-            self.lbl_timer.config(text=f"{minutes:02d}:{seconds:02d} / {target_min:02d}:{target_sec:02d}")
+            self.lbl_timer.config(text=format_recording_clock(elapsed, self.target_duration))
             active = self.follower.current_recording == self.active_task_id
             if not active:
                 self.overlay.show_roster_hud(f"[{self.active_task_id}] DANG CHO ODX KET THUC...", fg_color="#F59E0B")
@@ -3429,6 +3510,8 @@ class OdxAutoPilotGUI:
                 self.overlay.show_roster_hud(self.mouse_warning_text, fg_color="#EF4444")
             else:
                 self.overlay.update_recording(self.active_task_id, elapsed, self.target_duration, blink=(int(elapsed) % 2 == 0), is_host=True)
+            if active:
+                self.prepare_host_stop_if_needed(elapsed)
             if (elapsed >= self.target_duration and not self.is_stopping
                     and active and not self.capture_state_unknown and not self._stop_confirmation_failed):
                 self.request_host_stop("validate")
@@ -3595,7 +3678,7 @@ class OdxAutoPilotGUI:
         self._transition_token += 1
         self._player_connection_generation += 1
         preferences = getattr(self, "window_preferences", None)
-        actions = [self.stop_settings_sync, self.cancel_host_room_creation,
+        actions = [self.cancel_prepared_host_stop, self.stop_settings_sync, self.cancel_host_room_creation,
                    lambda: self.cancel_player_ready(cancel_connection=True)]
         if preferences is not None:
             actions.insert(0, preferences.close)

@@ -85,6 +85,13 @@ class CaptureFinalizationTests(unittest.TestCase):
         self.assertGreaterEqual(self.audit_times[0], 1.0)
         self.assertEqual(Path(result.target), self.target)
 
+    def test_success_exposes_saved_duration_for_host_and_player_final_clocks(self):
+        self.populate()
+        (self.target / "session.json").write_text('{"duration_seconds":241.3}', encoding="utf-8")
+        result = self.wait()
+        self.assertTrue(result.passed)
+        self.assertEqual(result.duration_seconds, 241.3)
+
     def test_artifacts_arriving_after_fifteen_seconds_are_still_audited(self):
         self.clock.later(20, self.populate)
         result = self.wait(timeout=40)

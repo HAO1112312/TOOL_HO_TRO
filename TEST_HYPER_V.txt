@@ -1,9 +1,12 @@
-TEST ĐỒNG BỘ HOST – PLAYER TRONG MÁY ẢO (v3.2.11)
+TEST ĐỒNG BỘ HOST – PLAYER TRONG MÁY ẢO (v3.2.12)
 
 Mục đích: quay desktop thật trên từng Windows để thử đồng bộ, F10, thời lượng,
 random, HUD, Ready, chọn -fix và chặn trùng task mà không cần mở game.
 Đây vẫn là bản quay thật do Odx thực hiện, không mô phỏng dữ liệu đầu ra.
 Các bước cài Python và chạy tool cũng áp dụng cho VM Windows trong VMware.
+Đồng hồ HUD/Host/Player hiện phần mười giây; sau kiểm định, so với thời lượng
+thực trong session.json hoặc video. Thời lượng đặt là mục tiêu, không phải số
+giây bị ép vào kết quả. Tool không cắt video hoặc sửa dữ liệu để khớp đồng hồ.
 Sau task, VM có thể cần thêm thời gian để Odx hoàn tất file. Tool chờ đủ bộ
 file ổn định rồi kiểm định, thử lại trong 90 giây trước khi kết luận chưa đạt.
 PASS cục bộ tự bật Ready khi room đã kết thúc; nếu còn lỗi, xem nguyên nhân

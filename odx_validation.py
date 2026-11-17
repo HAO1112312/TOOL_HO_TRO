@@ -195,6 +195,19 @@ class CaptureAuditResult:
     target: str
     error: str = ""
     cancelled: bool = False
+    duration_seconds: float | None = None
+
+
+def capture_duration_seconds(target):
+    """Read the actual native session duration without changing capture data."""
+    try:
+        data = json.loads((Path(target) / "session.json").read_text(encoding="utf-8-sig"))
+        value = data.get("duration_seconds")
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
+            return float(value)
+    except (OSError, UnicodeError, ValueError, TypeError, AttributeError, OverflowError):
+        pass
+    return None
 
 
 def _capture_snapshot(target):
@@ -291,7 +304,7 @@ def validate_finalized_capture(task_id, follower, *, odx_root=None, should_conti
                 previous, stable_since = None, None
                 reason = "file tiếp tục thay đổi trong lúc kiểm định; chờ ghi xong rồi kiểm tra lại"
             elif passed:
-                return CaptureAuditResult(True, target)
+                return CaptureAuditResult(True, target, duration_seconds=capture_duration_seconds(target))
             else:
                 reason = "; ".join(details) or "kiểm định chưa đạt; xem chi tiết AUDIT phía trên"
             retry_at = time.monotonic() + min(10, retry_seconds * attempts)

@@ -1,9 +1,16 @@
 ========================================================================
-     HƯỚNG DẪN SỬ DỤNG BỘ TOOL TỰ ĐỘNG HÓA ODX CAPTURE (v3.2.11)
+     HƯỚNG DẪN SỬ DỤNG BỘ TOOL TỰ ĐỘNG HÓA ODX CAPTURE (v3.2.12)
              GIAO DIỆN HIỆN ĐẠI (STUDIO UX/UI) & BACKEND ĐỒNG BỘ
 ========================================================================
 
 ⭐ BƯỚC 1: CÀI ĐẶT
+- Chuẩn bị sẵn bộ xử lý dừng trong 8 giây cuối, chỉ phát lệnh khi đủ giờ.
+  Loại phần chờ khởi tạo PowerShell/accessibility/API tại thời điểm dừng.
+  Chuẩn bị không dừng sớm, không khóa F10; vẫn kiểm tra đúng Host/room/task.
+- HUD và đồng hồ Host/Player dùng chung cách hiển thị phần mười giây.
+  Player dùng cùng mẫu thời gian cho HUD và giao diện, kể cả khi VM cập nhật chậm.
+  Khi kiểm định xong, đồng hồ/log ghi thời lượng thực từ session.json của Odx.
+  Thời lượng đặt là mục tiêu; độ trễ Windows/mạng vẫn có thể gây lệch vài frame.
 - Sau khi dừng, Host và Player chờ Odx báo lưu xong đúng task, đủ 8 file
   không rỗng và ổn định tối thiểu 1 giây trước khi kiểm định chỉ đọc.
   Tool theo đúng thư mục Odx báo lưu; chờ/thử lại trong 90 giây nếu VM còn
@@ -101,7 +108,7 @@
 ------------------------------------------------------------------------
 ⭐ ĐỒNG BỘ CẤU HÌNH HOST–PLAYER
 ------------------------------------------------------------------------
-- Cập nhật cùng bản 3.2.11 trên Host và mọi Player; giữ đủ các file đi kèm bộ tool.
+- Cập nhật cùng bản 3.2.12 trên Host và mọi Player; giữ đủ các file đi kèm bộ tool.
 - Host là nguồn chung cho mã task, thời lượng đã random, quy tắc random, số máy,
   thời gian nghỉ, tiến trình round và các lựa chọn hiển thị HUD.
 - Các ô thời lượng/random/nghỉ/số máy và các dấu chọn HUD trên Host được truyền

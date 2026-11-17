@@ -1,0 +1,20 @@
+ODX AUTO-PILOT 3.2.12 - ĐỒNG HỒ VÀ LỆNH DỪNG
+
+Đã xác nhận bản cũ có độ trễ khoảng 1,3 giây từ lúc tool yêu cầu dừng tới
+khi Odx nhận kết thúc, do khởi tạo PowerShell/accessibility và kiểm tra API.
+
+- Chuẩn bị bộ xử lý dừng trong 8 giây cuối; khi đủ giờ dùng bộ xử lý đã sẵn sàng.
+- Chuẩn bị chỉ đọc, không dừng sớm hoặc khóa phím F10 khẩn cấp.
+- Vẫn xác minh đúng Host/room/task/cửa sổ và phiên server mới; gọi End round
+  một lần. Nếu chưa chuẩn bị được, giữ luồng xác minh cũ, không gửi F10 toàn cục.
+- Helper riêng tự kết thúc khi dùng xong/hủy; giữ cửa sổ Odx và dữ liệu.
+- HUD/Host/Player dùng chung cách hiển thị MM:SS.s; sửa còn 0 giây trước khi
+  thật sự đủ giờ. Player HUD và giao diện dùng cùng một mẫu thời gian.
+- Dừng đồng hồ theo mốc dừng thật, không tính thời gian chờ lưu/kiểm định.
+- Sau kiểm định, hiển thị/log thời lượng video thực đọc từ session.json.
+  Không cắt hoặc sửa capture để làm đẹp thời gian. Windows/mạng vẫn có thể
+  gây lệch vài frame so với mục tiêu; không cam kết tuyệt đối từng frame.
+
+Nhận qua Cập nhật Online trên Host và tất cả Player khi không đang quay,
+rồi mở lại tool. Giữ cấu hình và các capture cũ; chọn task/-fix chưa tồn tại.
+Chỉ đóng Odx theo khi đóng tool. Giữ toàn bộ sửa lỗi của 3.2.11.

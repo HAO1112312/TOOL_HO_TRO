@@ -10,6 +10,7 @@ ODX CAPTURE: COMPACT FLOATING OVERLAY (KHÔNG CHE MÀN HÌNH)
 import sys
 import os
 import time
+from odx_timing import format_recording_clock, remaining_seconds
 import math
 import threading
 import queue
@@ -308,14 +309,12 @@ class OdxOverlay:
         if elapsed_sec < 0:
             self.show_pending_recording(task_id, -elapsed_sec, is_host=is_host)
             return
-        m_el, s_el = divmod(int(elapsed_sec), 60)
-        m_tg, s_tg = divmod(int(target_sec), 60)
-        rem = max(0, int(target_sec - elapsed_sec))
+        rem = remaining_seconds(elapsed_sec, target_sec)
         m_rem, s_rem = divmod(rem, 60)
         preferences = getattr(self, "_preferences", DEFAULT_PREFERENCES)
         english = preferences["hud_language"] == "en"
         task_text = f" [{task_id}]" if preferences["hud_show_task"] else ""
-        timer_text = f" | {m_el:02d}:{s_el:02d} / {m_tg:02d}:{s_tg:02d}" if preferences["hud_show_timer"] else ""
+        timer_text = f" | {format_recording_clock(elapsed_sec, target_sec)}" if preferences["hud_show_timer"] else ""
         dot = "● [REC]" if not blink else "○ [REC]"
         
         if elapsed_sec >= target_sec:

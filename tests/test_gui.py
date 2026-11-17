@@ -11,6 +11,7 @@ import threading
 import time
 import types
 import unittest
+from odx_timing import format_elapsed, format_recording_clock
 from unittest.mock import Mock, patch
 
 
@@ -86,6 +87,7 @@ class GuiTests(unittest.TestCase):
         self.messages = types.SimpleNamespace(showwarning=Mock(), showerror=Mock(),
                                               showinfo=Mock(), askyesno=Mock(return_value=True))
         self.ns = dict(be=self.backend, re=re, time=time, os=os, json=json,
+                       format_elapsed=format_elapsed, format_recording_clock=format_recording_clock,
                        tempfile=tempfile, threading=types.SimpleNamespace(Thread=DeferredThread,
                                                                           get_ident=threading.get_ident,
                                                                           Event=threading.Event),
@@ -432,7 +434,7 @@ class GuiTests(unittest.TestCase):
 
         with patch.object(time, "monotonic", return_value=106.2):
             self.gui.update_live_timer()
-        self.assertTrue(self.gui.lbl_timer.options["text"].startswith("00:03 /"))
+        self.assertTrue(self.gui.lbl_timer.options["text"].startswith("00:03.2 /"))
         self.gui.request_host_stop.assert_not_called()
 
     def test_late_recording_confirmation_uses_native_anchor_not_observation_time(self):
@@ -442,7 +444,7 @@ class GuiTests(unittest.TestCase):
             self.gui.begin_confirmed_recording(task_id, started_at=95)
             self.gui.update_live_timer()
         self.assertEqual(self.gui.rec_start_time, 95)
-        self.assertTrue(self.gui.lbl_timer.options["text"].startswith("00:05 /"))
+        self.assertTrue(self.gui.lbl_timer.options["text"].startswith("00:05.0 /"))
         self.assertEqual(self.gui.overlay.update_recording.call_args.args[:3], (task_id, 5, 240))
 
     def test_watch_start_passes_true_native_start_instead_of_early_setup_log(self):
@@ -525,7 +527,7 @@ class GuiTests(unittest.TestCase):
         recording_call = self.gui.overlay.update_recording.call_args
         self.assertEqual(recording_call.args[:3], (task_id, 1, 240))
         self.assertFalse(recording_call.kwargs["is_host"])
-        self.assertIn("00:01 /", self.gui.lbl_p_timer.options["text"])
+        self.assertIn("00:01.0 /", self.gui.lbl_p_timer.options["text"])
 
     def test_round_randomization_is_stable_and_shared_target_overrides_player_local_settings(self):
         self.gui.config.update(round_duration_seconds=300, random_enabled=True, random_offset_seconds=7)

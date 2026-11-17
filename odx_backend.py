@@ -23,6 +23,7 @@ import urllib.request
 import base64
 import hashlib
 import tempfile
+import queue
 from contextlib import contextmanager, ExitStack
 from odx_uia import ready_action_preamble
 from datetime import datetime
@@ -2286,8 +2287,310 @@ def _host_stop_report(result):
     return None
 
 
+def _prepared_host_stop_script(task, context):
+    """Load checked native code once; only an explicit invoke command can act."""
+    body = _host_stop_script(task, False, False, context,
+                             expected_room='__WARM_ROOM__', expected_player='__WARM_PLAYER__')
+    body = (body.replace('$allowInvoke=$false', '$allowInvoke=$invoke')
+            .replace(_ps_literal('__WARM_ROOM__'), '$preparedRoom')
+            .replace(_ps_literal('__WARM_PLAYER__'), '$preparedPlayer')
+            .replace('$result.hwnd=', '$result.request_id=$script:PreparedRequestId;$result.hwnd=')
+            .replace("Write-Output ('ODX_HOST_STOP:' + ($result|ConvertTo-Json -Compress))",
+                     "[Console]::Out.WriteLine('ODX_HOST_STOP:' + ($result|ConvertTo-Json -Compress))"))
+    return (_uia_script_prefix(*context) + ready_action_preamble() +
+            '\nfunction Invoke-PreparedHostStop([bool]$invoke,[string]$preparedRoom,[string]$preparedPlayer) {\n' +
+            body + '\n}\n' + r"""
+$script:PreparedDispatched=$false
+while($null -ne ($line=[Console]::In.ReadLine())) {
+    try {
+        $request=$line|ConvertFrom-Json
+        $script:PreparedRequestId=[int]$request.request_id
+        if($request.command -eq 'cancel') {break}
+        if($request.command -eq 'probe') {
+            Invoke-PreparedHostStop $false '' ''
+        } elseif($request.command -eq 'invoke' -and -not $script:PreparedDispatched) {
+            # Consume the sole permission before touching the native control.
+            $script:PreparedDispatched=$true
+            Invoke-PreparedHostStop $true ([string]$request.room) ([string]$request.player)
+        }
+        [Console]::Out.Flush()
+    } catch {break}
+}
+""")
+
+
+class _PreparedStopProcess:
+    """A private PowerShell worker; closing it never closes the Odx GUI."""
+    def __init__(self, task, context):
+        self._io_lock = threading.Lock()
+        self._closed_lock = threading.Lock()
+        self._closed = False
+        self._responses = queue.Queue()
+        self._sequence = 0
+        self.process = None
+        bootstrap = ("[Console]::InputEncoding=[Text.UTF8Encoding]::new($false); "
+                     "$source=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadLine())); "
+                     "& ([ScriptBlock]::Create($source))")
+        encoded = base64.b64encode(bootstrap.encode('utf-16le')).decode('ascii')
+        try:
+            self.process = subprocess.Popen(
+                ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, encoding='utf-8', errors='replace',
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            register_managed_process(self.process)
+            source = base64.b64encode(_prepared_host_stop_script(task, context).encode('utf-8')).decode('ascii')
+            self.process.stdin.write(source + '\n')
+            self.process.stdin.flush()
+            threading.Thread(target=self._read_reports, daemon=True).start()
+        except Exception:
+            self.close()
+            raise
+
+    @property
+    def alive(self):
+        return self.process is not None and self.process.poll() is None and not self._closed
+
+    def _read_reports(self):
+        try:
+            for line in self.process.stdout:
+                if line.startswith('ODX_HOST_STOP:'):
+                    try:
+                        self._responses.put(json.loads(line.partition(':')[2]))
+                    except (ValueError, TypeError):
+                        pass
+        except (OSError, ValueError):
+            pass
+        finally:
+            self._responses.put(None)
+
+    def request(self, command, *, room='', player='', timeout=1):
+        deadline = time.monotonic() + max(.01, timeout)
+        if not self._io_lock.acquire(timeout=max(.01, timeout)):
+            return None
+        try:
+            if not self.alive:
+                return None
+            self._sequence += 1
+            request_id = self._sequence
+            self.process.stdin.write(json.dumps(dict(command=command, request_id=request_id,
+                                                     room=room, player=player)) + '\n')
+            self.process.stdin.flush()
+            while time.monotonic() < deadline:
+                try:
+                    report = self._responses.get(timeout=max(.01, deadline - time.monotonic()))
+                except queue.Empty:
+                    return None
+                if report is None:
+                    return None
+                if isinstance(report, dict) and report.get('request_id') == request_id:
+                    return report
+            return None
+        finally:
+            self._io_lock.release()
+
+    def close(self):
+        with self._closed_lock:
+            if self._closed:
+                return
+            self._closed = True
+        process = self.process
+        if process is None:
+            return
+        try:
+            if process.stdin:
+                process.stdin.close()  # EOF makes this worker leave its read loop.
+            process.wait(timeout=.3)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            try:
+                if process.poll() is None:
+                    process.terminate()  # Only this private worker, never Odx/the job.
+                process.wait(timeout=.3)
+            except (OSError, subprocess.SubprocessError):
+                try:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=.3)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+        finally:
+            try:
+                if process.stdout:
+                    process.stdout.close()
+            except (OSError, ValueError):
+                pass
+
+
+class PreparedRecordingStop:
+    """Refresh read-only stop checks before the deadline, then hand them off once."""
+    MAX_AGE = 2.0
+
+    def __init__(self, follower, task, hwnd, can_prepare=None, on_status=None):
+        self.follower, self.task, self.hwnd = follower, task, int(hwnd)
+        self.can_prepare, self.on_status = can_prepare, on_status
+        self._state_lock = threading.RLock()
+        self._stop_refresh = threading.Event()
+        self._transport = None
+        self.context = None
+        self._snapshot = None
+        self._claimed = self._cancelled = self._dispatched = False
+        threading.Thread(target=self._prepare, daemon=True).start()
+
+    def _allowed(self):
+        try:
+            return self.can_prepare is None or bool(self.can_prepare())
+        except Exception:
+            return False
+
+    def _fresh_locked(self):
+        return (not self._cancelled and not self._dispatched and self._snapshot is not None
+                and self._transport is not None and self._transport.alive
+                and 0 <= time.monotonic() - self._snapshot['observed_at'] <= self.MAX_AGE)
+
+    @property
+    def ready(self):
+        with self._state_lock:
+            return self._fresh_locked()
+
+    def claim(self):
+        # UI callers never wait for a subprocess, request or preparation thread.
+        with self._state_lock:
+            if self._claimed or not self._fresh_locked():
+                return False
+            self._claimed = True
+            self._stop_refresh.set()
+            return True
+
+    def _close_transport(self, transport):
+        if transport is not None:
+            threading.Thread(target=transport.close, daemon=True).start()
+
+    def cancel(self):
+        with self._state_lock:
+            if self._cancelled:
+                return
+            self._cancelled = True
+            self._stop_refresh.set()
+            transport = self._transport
+        self._close_transport(transport)
+
+    def _cancel_unclaimed(self):
+        with self._state_lock:
+            if self._claimed or self._cancelled:
+                return
+            self._cancelled = True
+            self._stop_refresh.set()
+            transport = self._transport
+        self._close_transport(transport)
+
+    def _accept_snapshot(self, report, data, observed_at):
+        if (not isinstance(report, dict) or not isinstance(data, dict) or data.get('error')
+                or report.get('status') != 'stop_action' or not report.get('is_host')
+                or (report.get('hwnd'), report.get('pid')) != self.context
+                or report.get('task_id') != self.task
+                or not re.fullmatch(r'[A-Z0-9]{6}', str(report.get('room_code') or ''))
+                or not str(report.get('player_id') or '')
+                or str(data.get('host') or '') != str(report.get('player_id'))):
+            return None
+        session = data.get('current_session')
+        server_task = session if isinstance(session, str) else next(
+            (session[key] for key in ('task', 'task_id', 'session_id')
+             if isinstance(session, dict) and session.get(key)), None)
+        if str(server_task or '') != self.task:
+            return None
+        return dict(observed_at=observed_at, room=report['room_code'], player=str(report['player_id']))
+
+    def _prepare(self):
+        try:
+            if not self._allowed() or self._stop_refresh.is_set():
+                return
+            context = _owned_uia_context(1)
+            if context is None or context[0] != self.hwnd:
+                return
+            with self._state_lock:
+                self.context = tuple(context)
+                if self._cancelled:
+                    return
+            transport = _PreparedStopProcess(self.task, self.context)
+            with self._state_lock:
+                self._transport = transport
+                cancelled = self._cancelled
+            if cancelled:
+                self._close_transport(transport)
+                return
+            first = True
+            while not self._stop_refresh.is_set() and self._allowed():
+                if _owned_uia_context(0) != self.context:
+                    return
+                report = transport.request('probe', timeout=2.5 if first else .4)
+                first = False
+                observed_at = time.monotonic()
+                data = fetch_room_status(str(report.get('room_code') or '')) if isinstance(report, dict) else None
+                snapshot = self._accept_snapshot(report, data, observed_at)
+                with self._state_lock:
+                    if self._claimed or self._cancelled:
+                        return
+                    self._snapshot = snapshot
+                if not transport.alive:
+                    return
+                self._stop_refresh.wait(.4)
+        except Exception:
+            pass  # Cold verified stop remains available if preparation fails.
+        finally:
+            self._cancel_unclaimed()
+
+    def dispatch_once(self, task, hwnd, can_stop, timeout):
+        """Return (attempted, report, context); ambiguous writes consume permission."""
+        with self._state_lock:
+            if (self._dispatched and task == self.task
+                    and (hwnd is None or int(hwnd) == self.hwnd)):
+                # Retrying the same consumed handoff must not re-enter the cold
+                # fallback and toggle again, even after its helper was closed.
+                return True, None, self.context
+            if (not self._claimed or not self._fresh_locked() or task != self.task
+                    or (hwnd is not None and int(hwnd) != self.hwnd)):
+                return False, None, None
+            snapshot, transport, context = dict(self._snapshot), self._transport, self.context
+        try:
+            if not can_stop() or _owned_uia_context(0) != context:
+                return False, None, None
+            with self._state_lock:
+                if not self._fresh_locked():
+                    return False, None, None
+                self._dispatched = True  # Set before writing; a lost reply is never retried.
+            report = transport.request('invoke', room=snapshot['room'], player=snapshot['player'],
+                                       timeout=min(1.5, max(.01, timeout)))
+            return True, report, context
+        except Exception:
+            with self._state_lock:
+                attempted = self._dispatched
+            return attempted, None, context
+
+
+def prepare_recording_stop(follower, active_task_id, hwnd, can_prepare=None, on_status=None):
+    """Start bounded, action-free preparation without blocking the GUI thread."""
+    task = str(active_task_id or '').strip()
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', task) or not hwnd:
+        return None
+    return PreparedRecordingStop(follower, task, hwnd, can_prepare, on_status)
+
+
 def stop_recording_verified(follower, active_task_id, hwnd=None, max_retry=4, timeout=None,
-                            allow_armed=False, can_stop=None, on_status=None):
+                            allow_armed=False, can_stop=None, on_status=None, prepared=None):
+    """End the verified Host round once, closing only its private prepared helper."""
+    try:
+        return _stop_recording_verified(follower, active_task_id, hwnd, max_retry, timeout,
+                                        allow_armed, can_stop, on_status, prepared)
+    finally:
+        if prepared is not None:
+            try:
+                prepared.cancel()
+            except Exception:
+                pass
+
+
+def _stop_recording_verified(follower, active_task_id, hwnd=None, max_retry=4, timeout=None,
+                             allow_armed=False, can_stop=None, on_status=None, prepared=None):
     """End this owned Host round once, without routing F10 through foreground.
 
     Native Host/task identity and the live server session must agree before the
@@ -2324,6 +2627,7 @@ def stop_recording_verified(follower, active_task_id, hwnd=None, max_retry=4, ti
         return False
     deadline = time.monotonic() + seconds
     context, attempted, announced = None, False, False
+    prepared_checked = False
     while time.monotonic() < deadline:
         if not allowed():
             return False
@@ -2349,6 +2653,16 @@ def stop_recording_verified(follower, active_task_id, hwnd=None, max_retry=4, ti
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
+        if prepared is not None and not prepared_checked:
+            prepared_checked = True
+            sent, response, warm_context = prepared.dispatch_once(task, hwnd, allowed, remaining)
+            if sent:
+                attempted, context = True, warm_context
+                if response and (response.get('hwnd') != context[0] or response.get('pid') != context[1]):
+                    return False
+                notify(f'Đã yêu cầu Kết thúc round một lần trên Odx [{task}]; chờ xác nhận dừng.', 'HOST')
+                if response and response.get('status') in {'wrong_identity', 'blocked', 'error'} and not response.get('invoked'):
+                    return False
         if context is None:
             context = _owned_uia_context(min(1, remaining))
             if context is None or (hwnd is not None and int(hwnd) != context[0]):
