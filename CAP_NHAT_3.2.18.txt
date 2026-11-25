@@ -1,0 +1,22 @@
+ODX CAPTURE AUTO-PILOT v3.2.18 — 2026-11-25
+
+- Bổ sung quét phím bàn phím không có trong key_bindings.json. Kiểm tra cả
+  raw/input_events.csv, vì Odx có thể loại phím lạ khỏi input_keys mà vẫn báo OK;
+  kiểm tra thêm phím còn xuất hiện trong frames.csv. So tên phím đúng kiểu native,
+  phân biệt hoa/thường, không tự đổi Ctrl thành Control hoặc thêm binding giả.
+- Dùng QPC của khung hình và số frame đã xuất để giới hạn dữ liệu thuộc video.
+  Phím bấm trước/sau video không bị báo nhầm; phím giữ xuyên thời điểm bắt đầu
+  vẫn được kiểm tra. Không miễn riêng F10/F11 nếu chúng nằm trong khoảng video.
+  Nếu chưa có đủ bằng chứng thời gian để phân loại phím lạ, chưa cho PASS và
+  thử lại theo luồng chờ lưu/kiểm định. Theo dõi cả file thời gian đến muộn.
+- Player gửi kết quả kiểm định cục bộ về Host theo đúng task, yêu cầu bắt đầu
+  và phiên phòng. Host chỉ ghi hoàn tất/tăng tiến độ khi bản thân PASS, Odx
+  ALL OK và nhận PASS của tất cả Player đã tham gia round. Lỗi Player hiện
+  tên/ID, task và lý do trên Host; không dùng Ready thay cho bằng chứng kiểm định.
+- Giữ dữ liệu gốc và key binding; kiểm định chỉ đọc. Dừng hủy không gửi PASS giả.
+  Không đóng hoặc khởi động lại Odx khi gặp lỗi/thử lại.
+- Chưa bổ sung tiêu chí mới cho nhãn “Input data validity” của bên duyệt,
+  theo yêu cầu tạm để phần này lại. Các kiểm định sẵn có vẫn được giữ.
+
+CẬP NHẬT CÙNG v3.2.18 TRÊN HOST VÀ MỌI PLAYER rồi mở lại tool trước khi quay.
+Player bản cũ không gửi kết quả mới; Host sẽ chờ, không tự coi đó là PASS.

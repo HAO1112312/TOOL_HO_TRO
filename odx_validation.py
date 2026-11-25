@@ -56,24 +56,145 @@ def _csv_rows(path, required_columns):
             yield row_number, row
 
 
+def _keyboard_name(value):
+    """Mirror native ordinal lookup, without case folding or invented aliases."""
+    return value
+
+
+def _input_video_window(target):
+    """Find the native input aggregation window, without editing metadata.
+
+    Input collection starts before recording. Session frame_count also prevents
+    a raw encoder tail from extending the bounds of the delivered video.
+    This metadata is used only to scope key-binding checks.
+    """
+    try:
+        with open(target / "session.json", "r", encoding="utf-8-sig") as stream:
+            session = json.load(stream)
+        count, fps = session.get("frame_count"), session.get("fps")
+        if type(count) is not int or count <= 0:
+            raise ValueError("session.json has no valid frame_count")
+        if type(fps) not in (int, float) or not math.isfinite(fps) or fps <= 0:
+            raise ValueError("session.json has no valid fps")
+        delivered_rows = sum(1 for _ in _csv_rows(target / "frames.csv", {"input_mouse_buttons"}))
+        if delivered_rows != count:
+            raise ValueError("session.json frame_count does not match delivered frames.csv rows")
+        first, last, rows = None, None, 0
+        for number, row in _csv_rows(target / "raw" / "video_frames.csv", {"frame_index", "t_grid_qpc_ms"}):
+            if int(row["frame_index"]) != rows:
+                raise ValueError(f"raw/video_frames.csv has unexpected frame_index at row {number}")
+            grid = float(row["t_grid_qpc_ms"])
+            if not math.isfinite(grid) or grid < 0 or (last is not None and grid <= last):
+                raise ValueError(f"raw/video_frames.csv has invalid grid time at row {number}")
+            if first is None:
+                first = grid
+            last, rows = grid, rows + 1
+            if rows == count:
+                return (first - 1000 / fps, last), ""
+        raise ValueError("raw/video_frames.csv has fewer rows than delivered frame_count")
+    except (OSError, UnicodeError, csv.Error, ValueError, TypeError, AttributeError, OverflowError) as exc:
+        return None, str(exc)
+
+
 def inspect_input_data(target_path):
-    """Return (valid, diagnostics); malformed input never counts as a mouse PASS."""
+    """Read-only key-binding checks plus the existing mouse/schema checks.
+
+    Raw QPC timestamps are absolute milliseconds, so equal adjacent times and
+    values larger than the video duration are valid. Do not invent bindings,
+    exempt control hotkeys, or require a key-down/up pair inside this capture.
+    """
     target = Path(target_path)
     problems = []
+    issue_count = 0
+
+    def report(problem):
+        nonlocal issue_count
+        issue_count += 1
+        if len(problems) < 50:
+            problems.append(problem)
+
+    keyboard_bindings = None
+    try:
+        with open(target / "key_bindings.json", "r", encoding="utf-8-sig") as stream:
+            data = json.load(stream)
+        bindings = data.get("bindings") if isinstance(data, dict) else None
+        if not isinstance(bindings, dict) or not bindings:
+            raise ValueError("bindings must be a nonempty object")
+        keyboard_bindings = set()
+        for name, action in bindings.items():
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("binding names must be nonempty strings")
+            if not isinstance(action, str) or not action.strip():
+                raise ValueError(f"binding {name!r} must have a nonempty action string")
+            if any(marker in name.lower() for marker in ("mouse", "button", "click", "xbutton", "side", "thumb")):
+                if not _button_allowed(name):
+                    report(f"key_bindings.json: disallowed mouse binding {name!r}")
+            if not _button_allowed(name):
+                # Native MapInputs uses binding names directly, without expanding
+                # chords or 2xV into undeclared standalone physical key bindings.
+                keyboard_bindings.add(_keyboard_name(name))
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        report(f"key_bindings.json: {exc}")
+
+    def inspect_keyboard(name, source, row):
+        if not name.strip():
+            report(f"{source} row {row}: empty keyboard key")
+        elif keyboard_bindings is not None and _keyboard_name(name) not in keyboard_bindings:
+            report(f"{source} row {row}: keyboard key {name[:128]!r} is not in key_bindings.json")
+
+    window, window_error = _input_video_window(target)
+    held_before_video = {}
+    entered_video = False
+
+    def report_held_keys():
+        for name, number in held_before_video.values():
+            inspect_keyboard(name, "raw/input_events.csv (held at video start)", number)
+        held_before_video.clear()
+
     try:
         for number, row in _csv_rows(target / "raw" / "input_events.csv", {"kind", "value"}):
             kind = row["kind"].strip().lower()
-            value = row["value"].strip()
+            value = row["value"] if kind in {"key_down", "key_up"} else row["value"].strip()
             if kind not in _RAW_KINDS:
                 raise ValueError(f"unknown input kind {kind!r} at row {number}")
-            if kind in {"button_down", "button_up"}:
+            if kind in {"key_down", "key_up"}:
+                if keyboard_bindings is None or _keyboard_name(value) in keyboard_bindings:
+                    continue
+                if window is None:
+                    inspect_keyboard(value, "raw/input_events.csv", number)
+                    report(f"raw/input_events.csv row {number}: cannot confirm video range for key {value[:128]!r}: {window_error}")
+                    continue
+                try:
+                    timestamp = float(row.get("t_qpc_ms", ""))
+                    if not math.isfinite(timestamp) or timestamp < 0:
+                        raise ValueError("invalid QPC timestamp")
+                except (ValueError, OverflowError):
+                    inspect_keyboard(value, "raw/input_events.csv", number)
+                    report(f"raw/input_events.csv row {number}: cannot locate key {value[:128]!r} in video without valid t_qpc_ms")
+                    continue
+                if timestamp <= window[0]:
+                    if entered_video:
+                        inspect_keyboard(value, "raw/input_events.csv (unordered key timestamp)", number)
+                    elif kind == "key_down":
+                        held_before_video[_keyboard_name(value)] = (value, number)
+                    else:
+                        held_before_video.pop(_keyboard_name(value), None)
+                else:
+                    if not entered_video:
+                        report_held_keys()
+                        entered_video = True
+                    if timestamp <= window[1]:
+                        inspect_keyboard(value, "raw/input_events.csv", number)
+            elif kind in {"button_down", "button_up"}:
                 if not _button_allowed(value):
-                    problems.append(f"raw input row {number}: disallowed mouse button {value!r}")
+                    report(f"raw/input_events.csv row {number}: disallowed mouse button {value!r}")
             elif kind in {"mouse_wheel", "mouse_scroll", "wheel", "scroll"}:
                 if not math.isfinite(float(value)):
                     raise ValueError(f"invalid wheel delta at row {number}")
+        if not entered_video:
+            report_held_keys()
     except (OSError, UnicodeError, csv.Error, ValueError, TypeError) as exc:
-        problems.append(f"raw/input_events.csv: {exc}")
+        report(f"raw/input_events.csv: {exc}")
 
     try:
         rows = 0
@@ -81,24 +202,16 @@ def inspect_input_data(target_path):
             rows += 1
             for button in _button_values(row["input_mouse_buttons"]):
                 if not _button_allowed(button):
-                    problems.append(f"frames.csv row {number}: disallowed mouse button {button!r}")
+                    report(f"frames.csv row {number}: disallowed mouse button {button!r}")
+            if "input_keys" in row:
+                for key in _button_values(row["input_keys"]):
+                    inspect_keyboard(key, "frames.csv", number)
         if not rows:
-            problems.append("frames.csv: no frame data")
+            report("frames.csv: no frame data")
     except (OSError, UnicodeError, csv.Error, ValueError, TypeError) as exc:
-        problems.append(f"frames.csv: {exc}")
-
-    try:
-        with open(target / "key_bindings.json", "r", encoding="utf-8-sig") as stream:
-            data = json.load(stream)
-        bindings = data.get("bindings") if isinstance(data, dict) else None
-        if not isinstance(bindings, dict) or not bindings:
-            raise ValueError("bindings must be a nonempty object")
-        for name in bindings:
-            if any(marker in name.lower() for marker in ("mouse", "button", "click", "xbutton", "side", "thumb")):
-                if not _button_allowed(name):
-                    problems.append(f"key_bindings.json: disallowed mouse binding {name!r}")
-    except (OSError, UnicodeError, ValueError, TypeError) as exc:
-        problems.append(f"key_bindings.json: {exc}")
+        report(f"frames.csv: {exc}")
+    if issue_count > len(problems):
+        problems.append(f"... {issue_count - len(problems)} additional input problems omitted from this summary")
     return not problems, problems
 
 
@@ -222,6 +335,15 @@ def _capture_snapshot(target):
             signature.append((name, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns))
         except (OSError, ValueError) as exc:
             problems.append(f"{name}: {exc}")
+    # Optional native frame timing scopes raw keyboard events. Watch both late
+    # arrival and changes through the audit without requiring it for old files
+    # whose keyboard inputs are all explicitly bound.
+    name = "raw/video_frames.csv"
+    try:
+        stat = (Path(target) / name).stat()
+        signature.append((name, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns))
+    except OSError:
+        signature.append((name, None))
     return tuple(signature), problems
 
 

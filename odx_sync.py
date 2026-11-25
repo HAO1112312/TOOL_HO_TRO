@@ -6,6 +6,7 @@ settings, sends capture commands, opens firewall rules, or copies local identity
 The native room code and host ID scope messages; they are not Internet passwords.
 """
 import copy
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
@@ -23,6 +24,9 @@ DISCOVERY_PORT = 45454
 MAX_PAYLOAD = 32768
 SETTINGS_PATH = "/odx-sync/v1/settings"
 ACK_PATH = "/odx-sync/v1/ack"
+AUDIT_PATH = "/odx-sync/v1/audit"
+MAX_AUDIT_PAYLOAD = 4096
+MAX_AUDIT_ERROR = 2000
 _TASK = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _ROOM = re.compile(r"[A-Z0-9]{6}\Z")
 _PHASES = frozenset(("idle", "preparing", "countdown", "recording", "stopping",
@@ -106,6 +110,7 @@ class HostSettingsServer:
         self._threads = []
         self._settings, self._revision, self._published_at = {}, 0, time.time()
         self._applied = {}
+        self._audit_reports = OrderedDict()
 
     @property
     def address(self):
@@ -142,6 +147,49 @@ class HostSettingsServer:
             if player_id not in self._applied and len(self._applied) >= 256:
                 return 429
             self._applied[player_id] = (revision, time.monotonic())
+        return 200
+
+    def audit_results(self, task_id, start_request_id):
+        """Return a detached snapshot of local Player verdicts for one round."""
+        if (not isinstance(task_id, str) or not _TASK.fullmatch(task_id)
+                or not isinstance(start_request_id, str)
+                or not re.fullmatch(r"[0-9a-f]{32}", start_request_id)):
+            return {}
+        with self._lock:
+            return copy.deepcopy(self._audit_reports.get((task_id, start_request_id), {}))
+
+    def _record_audit(self, payload, instance_id):
+        fields = {"task_id", "start_request_id", "player_id", "passed", "error", "report_id"}
+        if not isinstance(payload, dict) or set(payload) != fields:
+            return 400
+        task, nonce, player = (payload[key] for key in ("task_id", "start_request_id", "player_id"))
+        passed, detail, sequence = (payload[key] for key in ("passed", "error", "report_id"))
+        if (not isinstance(task, str) or not _TASK.fullmatch(task)
+                or not isinstance(player, str) or not _TASK.fullmatch(player)
+                or not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{32}", nonce)
+                or type(passed) is not bool or not isinstance(detail, str) or len(detail) > MAX_AUDIT_ERROR
+                or type(sequence) is not int or not 1 <= sequence <= 2**63 - 1):
+            return 400
+        with self._lock:
+            if (instance_id != self.instance_id or task != self._settings.get("task_id")
+                    or nonce != self._settings.get("start_request_id")):
+                return 409
+            key = task, nonce
+            reports = self._audit_reports.get(key)
+            previous = reports.get(player) if reports is not None else None
+            if previous is not None:
+                if sequence < previous["report_id"]:
+                    return 409
+                if sequence == previous["report_id"]:
+                    return 200 if all(previous[field] == payload[field] for field in fields) else 409
+            if previous is None and reports is not None and len(reports) >= 256:
+                return 429
+            if reports is None:
+                reports = self._audit_reports[key] = {}
+            reports[player] = dict(payload, received_at=time.monotonic())
+            self._audit_reports.move_to_end(key)
+            while len(self._audit_reports) > 128:
+                self._audit_reports.popitem(last=False)
         return 200
 
     def snapshot(self):
@@ -188,7 +236,7 @@ class HostSettingsServer:
                 self.send_json(owner.snapshot())
 
             def do_POST(self):
-                if self.path != ACK_PATH:
+                if self.path not in (ACK_PATH, AUDIT_PATH):
                     self.send_error(405)
                     return
                 if not self.scoped():
@@ -196,13 +244,22 @@ class HostSettingsServer:
                     return
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
-                    if length > 1024:
+                    if length > (MAX_AUDIT_PAYLOAD if self.path == AUDIT_PATH else 1024):
                         self.send_error(413)
                         return
                     if length < 1 or self.headers.get_content_type() != "application/json":
                         self.send_error(400)
                         return
                     payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                    if self.path == AUDIT_PATH:
+                        status = owner._record_audit(payload, self.headers.get("X-Odx-Instance"))
+                        if status != 200:
+                            self.send_error(status)
+                            return
+                        self.send_json(dict(ok=True, instance_id=owner.instance_id,
+                                            **{key: payload[key] for key in
+                                               ("task_id", "start_request_id", "player_id", "report_id")}))
+                        return
                     if not isinstance(payload, dict) or set(payload) != {"revision", "player_id"}:
                         self.send_error(400)
                         return
@@ -309,6 +366,9 @@ class PlayerSettingsClient:
         self._instance_id, self._revision, self._last_settings = None, -1, None
         self._last_address = None
         self._retired_instances = set()
+        self._audit_lock = threading.RLock()
+        self._audit_sequence = 0
+        self.last_audit_error = None
         self._opener = request.build_opener(request.ProxyHandler({}), _NoRedirect())
 
     @staticmethod
@@ -431,3 +491,55 @@ class PlayerSettingsClient:
         except (OSError, ValueError, UnicodeError, error.URLError) as exc:
             self.last_error = str(exc)
             return False
+
+    def report_audit(self, task_id, start_request_id, player_id, passed, error=""):
+        """Report a completed local audit; settings and their ACK stay separate.
+
+        The caller must discard obsolete audit generations before submitting.
+        Serialized monotonic report IDs reject delayed network deliveries while
+        allowing a newer explicit recheck to replace an earlier FAIL.
+        """
+        with self._audit_lock:
+            try:
+                settings = dict(self._last_settings or {})
+                instance, address = self._instance_id, self._last_address
+                if (not isinstance(task_id, str) or not _TASK.fullmatch(task_id)
+                        or not isinstance(player_id, str) or not _TASK.fullmatch(player_id)
+                        or not isinstance(start_request_id, str)
+                        or not re.fullmatch(r"[0-9a-f]{32}", start_request_id)
+                        or type(passed) is not bool or not isinstance(error, str) or len(error) > MAX_AUDIT_ERROR):
+                    raise ValueError("Invalid local audit verdict")
+                if (address is None or instance is None or task_id != settings.get("task_id")
+                        or start_request_id != settings.get("start_request_id")):
+                    raise ValueError("Fetch this Host round before reporting its local audit")
+                sequence = max(self._audit_sequence + 1, time.monotonic_ns())
+                if not 1 <= sequence <= 2**63 - 1:
+                    raise ValueError("Invalid local audit report sequence")
+                self._audit_sequence = sequence
+                payload = dict(task_id=task_id, start_request_id=start_request_id, player_id=player_id,
+                               passed=passed, error=error, report_id=sequence)
+                body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+                if len(body) > MAX_AUDIT_PAYLOAD:
+                    raise ValueError("Local audit report is too large")
+                endpoint = self._endpoint(address)[:-len(SETTINGS_PATH)] + AUDIT_PATH
+                outgoing = request.Request(endpoint, data=body, method="POST", headers={
+                    "X-Odx-Room": self.room_code, "X-Odx-Host": self.host_id,
+                    "X-Odx-Instance": instance, "Content-Type": "application/json"})
+                with self._opener.open(outgoing, timeout=self.timeout) as response:
+                    raw = response.read(1025)
+                    if response.headers.get_content_type() != "application/json" or len(raw) > 1024:
+                        raise ValueError("Invalid local audit acknowledgement")
+                    result = json.loads(raw.decode("utf-8"))
+                    if (not isinstance(result, dict) or result.get("ok") is not True
+                            or result.get("instance_id") != instance
+                            or any(result.get(key) != payload[key] for key in
+                                   ("task_id", "start_request_id", "player_id", "report_id"))
+                            or self._instance_id != instance
+                            or (self._last_settings or {}).get("task_id") != task_id
+                            or (self._last_settings or {}).get("start_request_id") != start_request_id):
+                        raise ValueError("Local audit acknowledgement belongs to another round")
+                self.last_audit_error = None
+                return True
+            except (OSError, ValueError, UnicodeError) as exc:
+                self.last_audit_error = str(exc)
+                return False

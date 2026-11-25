@@ -1,9 +1,20 @@
 ========================================================================
-     HƯỚNG DẪN SỬ DỤNG BỘ TOOL TỰ ĐỘNG HÓA ODX CAPTURE (v3.2.17)
+     HƯỚNG DẪN SỬ DỤNG BỘ TOOL TỰ ĐỘNG HÓA ODX CAPTURE (v3.2.18)
              GIAO DIỆN HIỆN ĐẠI (STUDIO UX/UI) & BACKEND ĐỒNG BỘ
 ========================================================================
 
 ⭐ BƯỚC 1: CÀI ĐẶT
+- Quét phím ngoài key binding: so phím trong dữ liệu thô và frames.csv với
+  key_bindings.json đúng tên/hoa thường của native. Báo file, dòng và phím lỗi;
+  không sửa dữ liệu hoặc tự bổ sung binding để tạo PASS.
+  Giới hạn theo QPC/số frame thực của video; phím giữ vào video vẫn kiểm tra.
+  Thiếu bằng chứng thời gian cho phím lạ thì chưa PASS, chờ hoặc kiểm định lại.
+- Host cần PASS cục bộ + Odx ALL OK + PASS kiểm định của mọi Player trước khi
+  ghi hoàn tất/tăng task. Player gửi kết quả về Host trước khi tự Ready.
+  Cập nhật cùng v3.2.18 trên mọi máy; thiếu kết quả Player thì Host tiếp tục chờ.
+- Chưa thêm tiêu chí cho nhãn Input data validity của bên duyệt; tạm để lại
+  theo yêu cầu. Các kiểm định sẵn có vẫn hoạt động.
+
 - Chọn Arma 3 hoặc Arma Reforger trên Host trước khi tạo room. Tool tự quét
   cửa sổ game đang chạy, chọn đúng hồ sơ game và bật Ghi âm thanh trên mỗi máy.
   Player nhận game từ Host rồi tự tìm nguồn trên máy mình; không chép handle
@@ -31,7 +42,7 @@
 - F10 dùng nhận diện native đã chuẩn bị, xác minh lại trực tiếp cửa sổ và
   nút Kết thúc đúng Host/room/task trước khi gọi. Không chờ API trên đường
   phát lệnh; xác nhận kết thúc/lưu/kiểm định vẫn theo Odx và server.
-- Sau cập nhật phải mở lại tool và kiểm tra tiêu đề v3.2.17. Thay file trên
+- Sau cập nhật phải mở lại tool và kiểm tra tiêu đề v3.2.18. Thay file trên
   đĩa không thay phiên Python đang chạy; bản đang mở vẫn dùng mã lúc khởi động.
 - HUD và đồng hồ Host/Player dùng chung cách hiển thị phần mười giây.
   Player dùng cùng mẫu thời gian cho HUD và giao diện, kể cả khi VM cập nhật chậm.
@@ -127,8 +138,8 @@
      Tool chờ xác nhận dừng tối đa 30 giây, sau đó chờ kết quả Odx trước khi cho chọn FIX.
      Nếu chưa rõ trạng thái, tool giữ task và không gửi lại F10 để tránh bật quay lại.
    - F8/F9: Kết thúc bằng F10 và chờ Odx xử lý xong trước khi về mã task gốc.
-5. Khi kết thúc tự động đủ thời lượng: Tool kiểm tra 8 file và dữ liệu chuột theo chế độ CHỈ ĐỌC.
-   Chỉ tăng task khi kiểm định cục bộ đạt và nhận ALL OK từ đủ 4 máy.
+5. Khi kết thúc tự động đủ thời lượng: Tool kiểm tra 8 file, key binding và dữ liệu chuột theo chế độ CHỈ ĐỌC.
+   Chỉ tăng task khi kiểm định Host và mọi Player đạt, đồng thời Odx báo ALL OK.
    Nếu thiếu xác nhận hoặc kiểm định lỗi, tool giữ task hiện tại để xử lý.
    Kiểm định không tự sửa CSV hoặc tạo dữ liệu camera thay thế.
 6. Ô 'Tổng' giới hạn số task gốc đã hoàn tất trong batch. Task -fix không bị
@@ -138,7 +149,7 @@
 ------------------------------------------------------------------------
 ⭐ ĐỒNG BỘ CẤU HÌNH HOST–PLAYER
 ------------------------------------------------------------------------
-- Cập nhật cùng bản 3.2.17 trên Host và mọi Player; giữ đủ các file đi kèm bộ tool.
+- Cập nhật cùng bản 3.2.18 trên Host và mọi Player; giữ đủ các file đi kèm bộ tool.
 - Host là nguồn chung cho mã task, thời lượng đã random, quy tắc random, số máy,
   thời gian nghỉ, tiến trình round, game, ghi âm và các lựa chọn hiển thị HUD.
   Mốc nhắc đổi hành động được chọn một lần cho mỗi yêu cầu bắt đầu, không random

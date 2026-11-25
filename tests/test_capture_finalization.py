@@ -296,6 +296,45 @@ class CaptureFinalizationTests(unittest.TestCase):
         self.assertGreaterEqual(self.validator.call_count, 2)
         self.assertIn("input_events.csv", "\n".join(self.messages))
 
+    def keyboard_fixture(self, timestamp):
+        self.populate()
+        self.follower.last_all_ok = self.task
+        self.follower.last_round_result = (self.task, "all ok")
+        (self.target / "raw" / "input_events.csv").write_text(
+            f"t_qpc_ms,kind,value,dx,dy\n{timestamp},key_down,F10,0,0\n", encoding="utf-8")
+        (self.target / "frames.csv").write_text(
+            "frame_id,input_keys,input_mouse_buttons\n0,null,null\n1,null,null\n", encoding="utf-8")
+        (self.target / "key_bindings.json").write_text('{"bindings":{"W":"Forward"}}', encoding="utf-8")
+        (self.target / "session.json").write_text('{"frame_count":2,"fps":30}', encoding="utf-8")
+        (self.odx_root / "bin").mkdir()
+        (self.odx_root / "bin" / "odx.exe").write_bytes(b"fixture, never executed")
+        self.audit_effect = validation.validate_and_inspect_capture
+        return subprocess.CompletedProcess([], 0, json.dumps({str(self.target): []}), "")
+
+    def keyboard_timing(self):
+        (self.target / "raw" / "video_frames.csv").write_text(
+            "frame_index,t_grid_qpc_ms,t_source_qpc_ms,duplicate\n0,100,100,0\n1,200,200,0\n", encoding="utf-8")
+
+    def test_unbound_in_video_key_never_passes_even_after_native_all_ok(self):
+        native = self.keyboard_fixture(150)
+        self.keyboard_timing()
+        before = {path.name: path.read_bytes() for path in self.target.rglob("*") if path.is_file()}
+        with mock.patch.object(validation.subprocess, "run", return_value=native), contextlib.redirect_stdout(io.StringIO()):
+            result = self.wait(timeout=6)
+        self.assertFalse(result.passed)
+        self.assertIn("F10", result.error)
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.target.rglob("*") if path.is_file()})
+
+    def test_late_native_timing_can_prove_a_stop_key_is_outside_video(self):
+        native = self.keyboard_fixture(250)
+        self.clock.later(3, self.keyboard_timing)
+        with mock.patch.object(validation.subprocess, "run", return_value=native), contextlib.redirect_stdout(io.StringIO()):
+            result = self.wait(timeout=10)
+        self.assertTrue(result.passed)
+        self.assertGreaterEqual(len(self.audit_times), 2)
+        self.assertGreaterEqual(self.audit_times[-1], 4)
+        self.assertTrue(any("F10" in line for line in self.messages), "Do not silently accept it before timing arrives")
+
 
 if __name__ == "__main__":
     unittest.main()

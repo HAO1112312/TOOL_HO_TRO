@@ -150,6 +150,11 @@ class OdxAutoPilotGUI:
         self._sync_polling = False
         self._shared_settings = {}
         self._shared_targets = {}
+        self._shared_audit_rounds = {}
+        self._round_audit_task = None
+        self._round_audit_nonce = None
+        self._round_audit_players = {}
+        self._player_report_inflight = None
         self._action_prompt_plans = {}
         self._action_prompt_seen = {}
         self._game_configuring = False
@@ -1425,6 +1430,7 @@ class OdxAutoPilotGUI:
                 self.lbl_player_sync.config(text="Game trong room khác Host; kết nối lại đúng cấu hình game trước khi Ready.", fg=ModernTheme.ACCENT_RED)
                 return
             self._shared_settings = settings
+            self.remember_shared_audit_round(settings, client, envelope["instance_id"])
             task = settings.get("task_id")
             if task and settings.get("target_duration"):
                 self._shared_targets[task] = int(settings["target_duration"])
@@ -2261,6 +2267,10 @@ class OdxAutoPilotGUI:
                 self.log(f"Chờ Player áp dụng cấu hình bản {revision}: {', '.join(sorted(waiting))}.", "WAIT")
                 return
         task_id = self.active_task_id
+        self._round_audit_task = task_id
+        self._round_audit_nonce = getattr(self, "_sync_start_nonce", None)
+        self._round_audit_players = {str(member.get("player_id")): str(member.get("name") or member.get("player_id"))
+                                     for member in members if str(member.get("player_id")) != str(host_id)}
         self.plan_action_prompt(task_id)
         self.original_task_before_abort = re.sub(r"-fix\d+$", "", task_id)
         self.target_duration = self.round_target_duration(task_id)
@@ -2749,6 +2759,43 @@ class OdxAutoPilotGUI:
         self.overlay.show_roster_hud(text, fg_color="#F59E0B")
         self.log(text, "TASK")
 
+    def wait_player_audits(self, task_id, token):
+        if not getattr(self, "_sync_required", False):
+            return True, None
+        if getattr(self, "_round_audit_task", None) != task_id:
+            return False, "Chưa xác nhận danh sách kiểm định của round này."
+        players = dict(getattr(self, "_round_audit_players", {}))
+        if not players:
+            return True, None
+        nonce = getattr(self, "_round_audit_nonce", None)
+        server = self._sync_server
+        if not server or not callable(getattr(server, "audit_results", None)) or not re.fullmatch(r"[0-9a-f]{32}", str(nonce or "")):
+            return False, "Chưa khởi tạo kênh nhận kiểm định Player; cần cập nhật cùng bản trên mọi máy."
+        deadline, next_notice = time.monotonic() + 120, 0
+        while self.is_running and token == self._transition_token:
+            if self._sync_server is not server:
+                return False, "Phiên đồng bộ đã đổi; không dùng kết quả kiểm định cũ."
+            results = server.audit_results(task_id, nonce)
+            if not isinstance(results, dict):
+                return False, "Kết quả kiểm định Player không hợp lệ."
+            failed = [(pid, results[pid]) for pid in players if pid in results and
+                      (results[pid].get("passed") is False or results[pid].get("error"))]
+            if failed:
+                return False, "; ".join(f"Player {players[pid]} ({pid}) kiểm định FAIL: {result.get('error') or 'dữ liệu chưa đạt'}"
+                                       for pid, result in failed)
+            waiting = [pid for pid in players if results.get(pid, {}).get("passed") is not True]
+            if not waiting:
+                self.log(f"Đã nhận kiểm định PASS đúng round [{task_id}] từ {len(players)} Player.", "AUDIT")
+                return True, None
+            now = time.monotonic()
+            if now >= deadline:
+                return False, "Chưa nhận kiểm định PASS từ Player: " + ", ".join(players[pid] for pid in waiting)
+            if now >= next_notice:
+                next_notice = now + 5
+                self.log(f"Chờ kiểm định Player [{task_id}]: {', '.join(players[pid] for pid in waiting)}. Chưa tăng tiến độ.", "WAIT")
+            time.sleep(.2)
+        return False, "Phiên kiểm định đã kết thúc."
+
     def run_post_capture_validation(self, task_id, token=None):
         if token is None:
             token = self._transition_token
@@ -2781,6 +2828,10 @@ class OdxAutoPilotGUI:
                     error = str(result[1])
                     break
                 time.sleep(0.2)
+            if is_pass and all_ok and not error:
+                team_passed, team_error = self.wait_player_audits(task_id, token)
+                if not team_passed:
+                    is_pass, error = False, team_error
         except Exception as exc:
             error = str(exc)
         if duration_seconds is None:
@@ -3516,7 +3567,53 @@ class OdxAutoPilotGUI:
         if current():
             self.post_ui(self.finish_player_validation, generation, task, round_token, bool(ok), cancelled, error, duration_seconds)
 
-    def finish_player_validation(self, generation, task, round_token, ok, cancelled=False, error="", duration_seconds=None):
+    def remember_shared_audit_round(self, settings, client, instance_id):
+        task, nonce = settings.get("task_id"), settings.get("start_request_id")
+        if (not task or not self.valid_task_id(task) or not re.fullmatch(r"[0-9a-f]{32}", str(nonce or ""))
+                or not re.fullmatch(r"[0-9a-f]{32}", str(instance_id or ""))):
+            return
+        if not hasattr(self, "_shared_audit_rounds"):
+            self._shared_audit_rounds = {}
+        self._shared_audit_rounds[task] = dict(client=client, instance_id=instance_id,
+                                              start_request_id=nonce, generation=self._player_connection_generation)
+        if len(self._shared_audit_rounds) > 128:
+            self._shared_audit_rounds.pop(next(iter(self._shared_audit_rounds)))
+
+    def report_player_validation(self, generation, task, round_token, ok, error, duration_seconds):
+        def current():
+            return (self.is_running and generation == self._player_connection_generation
+                    and self._player_round_token == round_token
+                    and self._player_validation_token == (generation, task, round_token))
+        context = getattr(self, "_shared_audit_rounds", {}).get(task, {})
+        client, nonce = context.get("client"), context.get("start_request_id")
+        sent, failure = False, "Chưa xác định phiên kiểm định của Host."
+        deadline = time.monotonic() + 30
+        while current():
+            if (client is None or client is not self._sync_client
+                    or context.get("generation", generation) != generation
+                    or getattr(client, "instance_id", None) != context.get("instance_id")
+                    or not re.fullmatch(r"[0-9a-f]{32}", str(nonce or ""))):
+                break
+            try:
+                sent = client.report_audit(task, nonce, str(self.config.get("player_id", "")),
+                                           bool(ok), str(error or "")[:2000]) is True
+                failure = getattr(client, "last_audit_error", None) or "Host chưa xác nhận kết quả kiểm định."
+            except Exception as exc:
+                failure = str(exc)
+            if sent or not ok or time.monotonic() >= deadline:
+                break
+            time.sleep(.5)
+        if not current():
+            return
+        if not sent:
+            self.log(f"Chưa gửi được kiểm định [{task}] về Host: {failure}", "WARN")
+            if ok:
+                ok, error = False, f"PASS cục bộ nhưng chưa gửi được kết quả về Host: {failure}"
+        self.post_ui(self.finish_player_validation, generation, task, round_token, ok, False,
+                     error, duration_seconds, audit_reported=True)
+
+    def finish_player_validation(self, generation, task, round_token, ok, cancelled=False, error="", duration_seconds=None,
+                                 audit_reported=False):
         if (generation != self._player_connection_generation or
                 self._player_validation_token != (generation, task, round_token) or
                 self._player_round_token != round_token):
@@ -3526,6 +3623,17 @@ class OdxAutoPilotGUI:
             problem = self.player_blocking_room_error(task)
             if problem or (outcome != "all_ok" and not (cancelled and outcome == "cancelled")):
                 ok, error = False, problem or detail or "Odx chưa xác nhận ALL OK cho round này."
+        if getattr(self, "_sync_required", False) and not cancelled and not audit_reported:
+            identity = (generation, task, round_token)
+            if getattr(self, "_player_report_inflight", None) == identity:
+                return
+            self._player_report_inflight = identity
+            self.lbl_p_status.config(text=f"ĐANG GỬI KẾT QUẢ KIỂM ĐỊNH [{task}] VỀ HOST...", fg=ModernTheme.ACCENT_AMBER)
+            threading.Thread(target=self.report_player_validation,
+                             args=(generation, task, round_token, bool(ok), error, duration_seconds), daemon=True).start()
+            return
+        if getattr(self, "_player_report_inflight", None) == (generation, task, round_token):
+            self._player_report_inflight = None
         self.is_validating = False
         self._player_validation_token = None
         self._player_validation_failed = not ok

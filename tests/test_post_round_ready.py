@@ -46,7 +46,7 @@ class PostRoundReadyTests(unittest.TestCase):
         self.gui.is_validating = True
         self.gui._player_validation_token = (0, task, 1)
         self.gui.follower.last_round_result = (task, "cancelled" if cancelled else "all ok")
-        self.gui.finish_player_validation(0, task, 1, ok, cancelled)
+        self.gui.finish_player_validation(0, task, 1, ok, cancelled, audit_reported=True)
 
     def run_pending_workers(self):
         # Tk's after(0) callbacks run after the settings callback returns.

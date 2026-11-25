@@ -40,7 +40,7 @@ def get_current_version_info():
             return value
     except (OSError, ValueError):
         pass
-    return {"version": "3.2.17", "version_code": 337, "update_url": "", "download_url": ""}
+    return {"version": "3.2.18", "version_code": 338, "update_url": "", "download_url": ""}
 
 
 def get_update_url():
