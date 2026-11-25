@@ -176,6 +176,11 @@ class OdxOverlay:
         self.action_canvas.create_text(0, 0, text=ACTION_PROMPT_TEXT, fill="#FFE066",
                                        anchor="center", justify="center",
                                        tags=("action_label", "action_main"))
+        for index in range(8):
+            self.action_canvas.create_text(0, 0, text="", fill="#000000", anchor="center",
+                                           justify="center", tags=("task_label", f"task_outline_{index}"))
+        self.action_canvas.create_text(0, 0, text="", fill="#ffffff", anchor="center",
+                                       justify="center", tags=("task_label", "task_main"))
         self._action_hide_after = None
         self._apply_stealth(self.action_win)
         self.action_win.withdraw()
@@ -382,7 +387,7 @@ class OdxOverlay:
             pass
         return 0, 0, screen_w, screen_h
 
-    def _position_action_window(self, preferences, screen_w, screen_h):
+    def _position_action_window(self, preferences, screen_w, screen_h, task_id=None):
         scale = preferences["hud_scale"]
         width, height, x, y = self._fit_action_bounds(self._action_work_area(screen_w, screen_h), scale)
         self.action_win.geometry(f"{width}x{height}{x:+d}{y:+d}")
@@ -390,12 +395,21 @@ class OdxOverlay:
         self.action_canvas.config(width=width, height=height)
         self.action_canvas.itemconfigure("action_label", text=ACTION_PROMPT_TEXT,
                                          font=("Arial", title_size, "bold"), width=max(1, width - 40))
+        task_id = task_id if task_id is not None else getattr(self, "_action_task", None)
+        task_text = f"Task: {task_id}" if preferences["hud_show_task"] and task_id else ""
+        self.action_canvas.itemconfigure("task_label", text=task_text,
+                                         font=("Arial", max(10, min(round(14 * scale), title_size // 2)), "bold"),
+                                         width=max(1, width - 40))
+        title_y = height / 2 - round(16 * scale) if task_text else height / 2
+        task_y = height / 2 + round(40 * scale)
         outline = max(1, round(2 * scale))
         for index, (dx, dy) in enumerate(((-1, -1), (0, -1), (1, -1), (-1, 0),
                                          (1, 0), (-1, 1), (0, 1), (1, 1))):
             self.action_canvas.coords(f"action_outline_{index}", width / 2 + dx * outline,
-                                       height / 2 + dy * outline)
-        self.action_canvas.coords("action_main", width / 2, height / 2)
+                                       title_y + dy * outline)
+            self.action_canvas.coords(f"task_outline_{index}", width / 2 + dx, task_y + dy)
+        self.action_canvas.coords("action_main", width / 2, title_y)
+        self.action_canvas.coords("task_main", width / 2, task_y)
 
     def _hide_action_ui(self, generation=None):
         """Run only on the Tk thread; a stale timer cannot hide a later cue."""
@@ -424,7 +438,7 @@ class OdxOverlay:
             if not preferences["hud_enabled"] or not preferences.get("action_prompt_enabled", True):
                 return False
         self._hide_action_ui(generation)
-        self._position_action_window(preferences, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+        self._position_action_window(preferences, self.root.winfo_screenwidth(), self.root.winfo_screenheight(), task_id)
         with self._action_state():
             if generation != self._action_generation or self._overlay_closed:
                 return False

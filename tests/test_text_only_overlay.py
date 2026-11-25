@@ -57,16 +57,28 @@ class TextOnlyOverlayNativeTests(unittest.TestCase):
 
             rgb = root.winfo_rgb(module.ACTION_TRANSPARENT_COLOR)
             expected_key = (rgb[0] >> 8) | ((rgb[1] >> 8) << 8) | ((rgb[2] >> 8) << 16)
-            for opacity in (.95, .6, 1.0):
-                with self.subTest(opacity=opacity):
-                    preferences = dict(module.DEFAULT_PREFERENCES, hud_opacity=opacity)
+            for opacity, show_task in ((.95, True), (.6, False), (1.0, True)):
+                with self.subTest(opacity=opacity, show_task=show_task):
+                    preferences = dict(module.DEFAULT_PREFERENCES, hud_opacity=opacity,
+                                       hud_show_task=show_task)
                     overlay._apply_window_preferences(preferences, root.winfo_screenwidth(), root.winfo_screenheight())
                     root.update_idletasks()
                     items = canvas.find_all()
                     self.assertTrue(items)
                     self.assertEqual({canvas.type(item) for item in items}, {"text"})
-                    self.assertEqual({canvas.itemcget(item, "text") for item in items}, {module.ACTION_PROMPT_TEXT})
-                    self.assertEqual(set(items), set(canvas.find_withtag("action_label")))
+                    action_items = set(canvas.find_withtag("action_label"))
+                    task_items = set(canvas.find_withtag("task_label"))
+                    self.assertTrue(action_items)
+                    self.assertTrue(task_items)
+                    self.assertEqual(set(items), action_items | task_items)
+                    self.assertFalse(action_items & task_items)
+                    visible_text = {canvas.itemcget(item, "text") for item in items
+                                    if canvas.itemcget(item, "state") != "hidden"
+                                    and canvas.itemcget(item, "text")}
+                    expected_text = {module.ACTION_PROMPT_TEXT}
+                    if show_task:
+                        expected_text.add("Task: private-task-01")
+                    self.assertEqual(visible_text, expected_text)
 
                     hwnd = user.GetParent(window.winfo_id()) or window.winfo_id()
                     key, alpha, flags = wintypes.DWORD(), wintypes.BYTE(), wintypes.DWORD()

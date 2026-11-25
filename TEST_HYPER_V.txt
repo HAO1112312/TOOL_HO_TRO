@@ -1,4 +1,4 @@
-TEST ĐỒNG BỘ HOST – PLAYER TRONG MÁY ẢO (v3.2.16)
+TEST ĐỒNG BỘ HOST – PLAYER TRONG MÁY ẢO (v3.2.17)
 
 Mục đích: quay desktop thật trên từng Windows để thử đồng bộ, F10, thời lượng,
 random, HUD, Ready, chọn -fix và chặn trùng task mà không cần mở game.
@@ -6,7 +6,7 @@ random, HUD, Ready, chọn -fix và chặn trùng task mà không cần mở gam
 Các bước cài Python và chạy tool cũng áp dụng cho VM Windows trong VMware.
 Odx 0.3.8 có thể nằm trong hai thư mục odx-capture-0.3.8-win-x64 lồng nhau;
 tool tự nhận đúng thư mục chứa bin và data. Gói cập nhật Tool không kèm Odx.
-Kiểm tra tiêu đề v3.2.16 trên Host và mọi VM sau khi mở lại. Bản đang mở
+Kiểm tra tiêu đề v3.2.17 trên Host và mọi VM sau khi mở lại. Bản đang mở
 không tự thay mã trong bộ nhớ chỉ vì các file đã được cập nhật trên đĩa.
 Thử F10 dừng sớm ở nhiều thời điểm, gồm giữ F10 rồi nhả: lệnh gửi ở keydown,
 không chờ nhả và không phát lệnh quay mới khi nhả phím sau khi round đã kết thúc.

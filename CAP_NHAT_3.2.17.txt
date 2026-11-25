@@ -1,0 +1,8 @@
+ODX CAPTURE AUTO-PILOT v3.2.17 — 2026-11-25
+
+- Giữ tên task bên dưới lời nhắc “THAY ĐỔI HÀNH ĐỘNG”. Cả hai dòng là chữ có
+  viền mảnh, nền hoàn toàn trong suốt; không có khung màu che game.
+- Dấu chọn Mã task trên Host vẫn điều khiển hiển thị tên task và đồng bộ Player.
+  Giữ mốc random 02:05–02:10, hiện 5 giây, chuột bấm xuyên và không giành focus.
+
+Cập nhật cùng v3.2.17 trên Host và mọi Player rồi mở lại tool.
