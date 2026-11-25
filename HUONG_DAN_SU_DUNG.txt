@@ -1,9 +1,22 @@
 ========================================================================
-     HƯỚNG DẪN SỬ DỤNG BỘ TOOL TỰ ĐỘNG HÓA ODX CAPTURE (v3.2.14)
+     HƯỚNG DẪN SỬ DỤNG BỘ TOOL TỰ ĐỘNG HÓA ODX CAPTURE (v3.2.15)
              GIAO DIỆN HIỆN ĐẠI (STUDIO UX/UI) & BACKEND ĐỒNG BỘ
 ========================================================================
 
 ⭐ BƯỚC 1: CÀI ĐẶT
+- Chọn Arma 3 hoặc Arma Reforger trên Host trước khi tạo room. Tool tự quét
+  cửa sổ game đang chạy, chọn đúng hồ sơ game và bật Ghi âm thanh trên mỗi máy.
+  Player nhận game từ Host rồi tự tìm nguồn trên máy mình; không chép handle
+  cửa sổ hoặc đường dẫn của Host. Không chọn dòng game “không chạy”.
+- Mỗi round có một lần nhắc “THAY ĐỔI HÀNH ĐỘNG” lớn giữa màn hình trong 5 giây.
+  Host random một mốc 02:05–02:10, gửi cùng mốc cho Player trước khi bắt đầu.
+  Mốc tính từ lúc recorder ghi thật, không gồm countdown. Round ngắn hơn
+  126 giây không có lời nhắc này; có thể tắt bằng dấu chọn Nhắc đổi hành động.
+- Sau một round bình thường, Player chỉ tự Ready khi dữ liệu cục bộ ổn định,
+  kiểm định PASS và Odx xác nhận ALL OK của đúng round. Nếu còn render, tool
+  tiếp tục chờ tối đa 120 giây sau kiểm định; hết hạn có thể KIỂM ĐỊNH LẠI.
+  Lỗi từng thành viên hiện tên, task và lý do trong trạng thái/log/HUD của tool.
+  Round lỗi giữ nguyên kết quả; Host chọn mã mới/-fix chưa tồn tại để quay lại.
 - Hỗ trợ nhận diện Odx 0.3.8 khi ZIP giải nén thành hai thư mục cùng tên,
   ví dụ odx-capture-0.3.8-win-x64/odx-capture-0.3.8-win-x64/bin/odx.exe.
   Tool chọn đúng thư mục trong cùng, ưu tiên bản hợp lệ mới nhất trong bộ tool.
@@ -16,7 +29,7 @@
 - F10 dùng nhận diện native đã chuẩn bị, xác minh lại trực tiếp cửa sổ và
   nút Kết thúc đúng Host/room/task trước khi gọi. Không chờ API trên đường
   phát lệnh; xác nhận kết thúc/lưu/kiểm định vẫn theo Odx và server.
-- Sau cập nhật phải mở lại tool và kiểm tra tiêu đề v3.2.14. Thay file trên
+- Sau cập nhật phải mở lại tool và kiểm tra tiêu đề v3.2.15. Thay file trên
   đĩa không thay phiên Python đang chạy; bản đang mở vẫn dùng mã lúc khởi động.
 - HUD và đồng hồ Host/Player dùng chung cách hiển thị phần mười giây.
   Player dùng cùng mẫu thời gian cho HUD và giao diện, kể cả khi VM cập nhật chậm.
@@ -25,7 +38,7 @@
 - Sau khi dừng, Host và Player chờ Odx báo lưu xong đúng task, đủ 8 file
   không rỗng và ổn định tối thiểu 1 giây trước khi kiểm định chỉ đọc.
   Tool theo đúng thư mục Odx báo lưu; chờ/thử lại trong 90 giây nếu VM còn
-  ghi file hoặc file đang bị khóa. Ready chỉ bật sau khi kiểm định thành công.
+  ghi file hoặc file đang bị khóa. Ready cần PASS cục bộ và Odx ALL OK đúng round.
   Nếu hết thời gian chờ, Player hiện nguyên nhân và nút KIỂM ĐỊNH LẠI;
   nút này kiểm tra lại dữ liệu trong phòng hiện tại, không mở lại hoặc đóng Odx.
 - Khi đủ thời lượng, tool gọi trực tiếp hành động Kết thúc round của đúng
@@ -74,9 +87,11 @@
 ------------------------------------------------------------------------
 ⭐ BƯỚC 3: QUY TRÌNH QUAY CHO MÁY CHỦ (HOST)
 ------------------------------------------------------------------------
-1. Khởi động game Arma Reforger trước (chế độ Borderless hoặc Windowed).
+1. Khởi động Arma 3 hoặc Arma Reforger trước (chế độ Borderless hoặc Windowed).
 2. Chạy '1_CHAY_HOST_TU_DONG.bat' (chọn Yes khi hỏi quyền Admin).
 3. Trên giao diện Host:
+   - Chọn đúng game ở ô Game; để trống TEST khi quay game thật. Khi cả hai game
+     đang chạy, tool chỉ chọn game Host đã chỉ định. Không đổi game trong room.
    - Chọn Batch cần quay: 'batch1-ASRM', 'batch2-ASRM' hoặc 'asm-s221-'.
    - Bấm [Mở Odx Capture (Tạo Room)] một lần; tool tự mở Odx và bấm [Tạo room].
    - Chờ mã phòng 6 ký tự được xác nhận; không cần bấm lại trên cửa sổ Odx.
@@ -121,9 +136,11 @@
 ------------------------------------------------------------------------
 ⭐ ĐỒNG BỘ CẤU HÌNH HOST–PLAYER
 ------------------------------------------------------------------------
-- Cập nhật cùng bản 3.2.14 trên Host và mọi Player; giữ đủ các file đi kèm bộ tool.
+- Cập nhật cùng bản 3.2.15 trên Host và mọi Player; giữ đủ các file đi kèm bộ tool.
 - Host là nguồn chung cho mã task, thời lượng đã random, quy tắc random, số máy,
-  thời gian nghỉ, tiến trình round và các lựa chọn hiển thị HUD.
+  thời gian nghỉ, tiến trình round, game, ghi âm và các lựa chọn hiển thị HUD.
+  Mốc nhắc đổi hành động được chọn một lần cho mỗi yêu cầu bắt đầu, không random
+  riêng trên từng Player và không đổi theo các lần cập nhật cấu hình trong round.
 - Các ô thời lượng/random/nghỉ/số máy và các dấu chọn HUD trên Host được truyền
   cho Player. Kích thước, độ trong và ngôn ngữ HUD dùng các khóa hud_scale,
   hud_opacity, hud_language trong cấu hình Host và cũng được truyền sang Player.
@@ -131,7 +148,8 @@
   trước khi phát lệnh bắt đầu; bản quay đang chạy không đổi thời lượng giữa chừng.
 - Mỗi lần yêu cầu quay cần xác nhận mới. Player có sẵn tên task sẽ không xác nhận
   hoặc bật Ready; Host chờ chọn một mã khác thay vì cho Odx ghi đè bản cũ.
-- Mã/tên Player, nguồn quay, thiết bị âm thanh và đường dẫn riêng của mỗi máy được giữ lại.
+- Mã/tên Player và đường dẫn riêng của mỗi máy được giữ lại. Nguồn quay và hồ sơ
+  được chọn tại máy đó theo game Host yêu cầu; ghi âm tự bật, thiết bị do Odx quản lý.
 - Cùng LAN hoặc mạng máy ảo có liên lạc trực tiếp: để trống IP Host để tự tìm.
   Nếu không tự tìm được, nhập IP hoặc IP:45455 của Host ở tab Player.
 - Kênh cấu hình dùng TCP 45455 và tìm Host qua UDP 45454. Windows cần cho phép
@@ -142,7 +160,7 @@
 ------------------------------------------------------------------------
 ⭐ BƯỚC 4: QUY TRÌNH QUAY CHO MÁY CON (PLAYER)
 ------------------------------------------------------------------------
-1. Cắm tai nghe (kiểm tra có âm thanh) và khởi động game Arma Reforger.
+1. Cắm tai nghe (kiểm tra có âm thanh) và mở game Host đã chọn: Arma 3 hoặc Arma Reforger.
 2. Chạy '2_CHAY_PLAYER_TU_DONG.bat' (chọn Yes khi hỏi quyền Admin).
 3. Nhập mã phòng 6 ký tự do Host gửi -> Bấm [KẾT NỐI VÀO PHÒNG].
 4. Cửa sổ Odx Capture sẽ TỰ ĐỘNG BẬT LÊN MÀN HÌNH và tự động tích xanh (Auto-Ready).

@@ -1,4 +1,4 @@
-TEST ĐỒNG BỘ HOST – PLAYER TRONG MÁY ẢO (v3.2.14)
+TEST ĐỒNG BỘ HOST – PLAYER TRONG MÁY ẢO (v3.2.15)
 
 Mục đích: quay desktop thật trên từng Windows để thử đồng bộ, F10, thời lượng,
 random, HUD, Ready, chọn -fix và chặn trùng task mà không cần mở game.
@@ -6,7 +6,7 @@ random, HUD, Ready, chọn -fix và chặn trùng task mà không cần mở gam
 Các bước cài Python và chạy tool cũng áp dụng cho VM Windows trong VMware.
 Odx 0.3.8 có thể nằm trong hai thư mục odx-capture-0.3.8-win-x64 lồng nhau;
 tool tự nhận đúng thư mục chứa bin và data. Gói cập nhật Tool không kèm Odx.
-Kiểm tra tiêu đề v3.2.14 trên Host và mọi VM sau khi mở lại. Bản đang mở
+Kiểm tra tiêu đề v3.2.15 trên Host và mọi VM sau khi mở lại. Bản đang mở
 không tự thay mã trong bộ nhớ chỉ vì các file đã được cập nhật trên đĩa.
 Thử F10 dừng sớm ở nhiều thời điểm, gồm giữ F10 rồi nhả: lệnh gửi ở keydown,
 không chờ nhả và không phát lệnh quay mới khi nhả phím sau khi round đã kết thúc.
@@ -15,7 +15,8 @@ thực trong session.json hoặc video. Thời lượng đặt là mục tiêu, 
 giây bị ép vào kết quả. Tool không cắt video hoặc sửa dữ liệu để khớp đồng hồ.
 Sau task, VM có thể cần thêm thời gian để Odx hoàn tất file. Tool chờ đủ bộ
 file ổn định rồi kiểm định, thử lại trong 90 giây trước khi kết luận chưa đạt.
-PASS cục bộ tự bật Ready khi room đã kết thúc; nếu còn lỗi, xem nguyên nhân
+PASS cục bộ và ALL OK của đúng round mới tự bật Ready khi room đã kết thúc.
+Nếu Odx còn render, tool chờ thêm tối đa 120 giây; nếu còn lỗi, xem nguyên nhân
 trong AUDIT và bấm KIỂM ĐỊNH LẠI ngay trên Player, không cần kết nối lại.
 
 1. Chuẩn bị
@@ -69,6 +70,11 @@ trong AUDIT và bấm KIỂM ĐỊNH LẠI ngay trên Player, không cần kết
 - Di chuột và bấm phím bình thường bên trong mỗi Windows để có input thực.
   Nếu raw/input_events.csv trống, kiểm định sẽ báo lỗi; tool không tạo input giả.
 - Một lượt để chạy đủ thời lượng, chờ Odx xử lý và ALL OK rồi thử lượt tiếp.
+- Để thử lời nhắc đổi hành động, đặt thời lượng trên 130 giây. Mỗi round Host
+  chọn một mốc 125–130 giây từ lúc ghi thật, tất cả máy hiện lời nhắc giữa màn
+  hình trong 5 giây. Round thử 30 giây không hiện lời nhắc này.
+- Ghi âm tự bật cả trong TEST. Nếu có thành viên lỗi, tool báo tên/task/lý do,
+  giữ trạng thái lỗi và không tự coi kiểm định cục bộ là ALL OK của cả phòng.
 - Có thể giữ focus trong VMware khi hết giờ: tool gọi Kết thúc round trực tiếp
   trên đúng Odx Host. Lệnh chưa rõ kết quả không bị bấm lặp làm quay lại.
   Nếu mạng/room chưa xác nhận, tool báo trạng thái chờ và giữ Odx mở.
@@ -83,8 +89,8 @@ trong AUDIT và bấm KIỂM ĐỊNH LẠI ngay trên Player, không cần kết
 
 5. Quay lại chế độ game
 - Đóng tool trên từng máy để kết thúc Odx, mở tool lại rồi tắt TEST trên Host.
-- Tạo room mới và kết nối Player lại. Tool khôi phục nguồn/profile trước TEST
-  khi khởi chạy Odx bình thường; giữ các lựa chọn người dùng đã tự thay đổi.
+- Chọn Arma 3 hoặc Arma Reforger trước khi tạo room mới và kết nối Player lại.
+  Tool tự quét game đang chạy, chọn nguồn/profile đúng game và bật ghi âm.
 - Không đổi TEST trong một phòng đang mở, vì Odx chốt nguồn lúc tạo/join room.
 - Lỗi hoặc Làm mới kết nối không đóng cửa sổ Odx. Chỉ đóng tool mới kết thúc
   Odx và các tiến trình liên quan do tool đó mở; không cần xóa thư mục quay.

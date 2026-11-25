@@ -25,6 +25,7 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 
 # Import Backend Engine
 import odx_backend as be
+import odx_games as games
 from odx_overlay import OdxOverlay
 from odx_sync import HostSettingsServer, PlayerSettingsClient
 from odx_window import WindowPreferences
@@ -149,6 +150,12 @@ class OdxAutoPilotGUI:
         self._sync_polling = False
         self._shared_settings = {}
         self._shared_targets = {}
+        self._action_prompt_plans = {}
+        self._action_prompt_seen = {}
+        self._game_configuring = False
+        self._game_config_cancel = None
+        self._game_config_generation = 0
+        self._room_game_selection = None
         self._round_start_epoch = None
         self._pending_sync_start_task = None
         self._sync_start_after = None
@@ -207,7 +214,9 @@ class OdxAutoPilotGUI:
             "start_num": 1,
             "total_tasks": 15,
             "auto_increment": True,
-            "test_mode": False
+            "test_mode": False,
+            "action_prompt_enabled": True,
+            "record_audio": True
         }
         if os.path.exists(self.cfg_file):
             try:
@@ -712,12 +721,23 @@ class OdxAutoPilotGUI:
             entry.pack(side="left", padx=(0, 10))
             entry.bind("<FocusOut>", lambda event: self.save_shared_controls())
             setattr(self, name, entry)
+        game_row = tk.Frame(card_action, bg=ModernTheme.BG_CARD)
+        game_row.pack(fill="x", padx=15, pady=(0, 4))
+        tk.Label(game_row, text="Game:", bg=ModernTheme.BG_CARD, fg=ModernTheme.TEXT_MUTED,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 5))
+        self.var_game_selection = tk.StringVar(self.root, value=self.selected_game_name())
+        self.combo_game = ttk.Combobox(game_row, values=("Arma 3", "Arma Reforger"),
+                                       textvariable=self.var_game_selection, state="readonly", width=17)
+        self.combo_game.pack(side="left", padx=(0, 10))
+        self.combo_game.bind("<<ComboboxSelected>>", lambda event: self.on_game_selection_changed())
+        tk.Label(game_row, text="Âm thanh: tự bật", bg=ModernTheme.BG_CARD,
+                 fg=ModernTheme.TEXT_MUTED, font=("Segoe UI", 9)).pack(side="left", padx=(0, 12))
         self.var_test_mode = tk.BooleanVar(self.root, value=self.capture_test_mode())
         self.check_test_mode = tk.Checkbutton(
-            card_action, text="TEST đồng bộ: quay toàn màn hình, không cần game", variable=self.var_test_mode,
+            game_row, text="TEST: quay màn hình, không cần game", variable=self.var_test_mode,
             command=self.on_test_mode_changed, bg=ModernTheme.BG_CARD, fg=ModernTheme.ACCENT_AMBER,
             selectcolor=ModernTheme.BG_CARD_LIGHT, activebackground=ModernTheme.BG_CARD)
-        self.check_test_mode.pack(anchor="w", padx=15, pady=(0, 4))
+        self.check_test_mode.pack(side="left")
         self.lbl_host_sync = tk.Label(card_action, text="Đồng bộ: chờ tạo room", anchor="w",
                                       bg=ModernTheme.BG_CARD, fg=ModernTheme.TEXT_MUTED, font=("Segoe UI", 9))
         self.lbl_host_sync.pack(fill="x", padx=15, pady=(0, 6))
@@ -729,6 +749,7 @@ class OdxAutoPilotGUI:
             ("check_hud_timer", "Thời gian", "hud_show_timer"),
             ("check_hud_task", "Mã task", "hud_show_task"),
             ("check_hud_roster", "Danh sách phòng", "hud_show_roster"),
+            ("check_action_prompt", "Nhắc đổi hành động (02:05–02:10)", "action_prompt_enabled"),
         ):
             variable = tk.BooleanVar(self.root, value=bool(self.config.get(key, True)))
             setattr(self, "var_" + key, variable)
@@ -980,21 +1001,97 @@ class OdxAutoPilotGUI:
         return any(getattr(self, name, False) for name in (
             "is_recording", "is_counting_down", "is_stopping", "is_validating",
             "is_updating", "is_player_recording", "p_counting_down", "capture_state_unknown",
-            "is_connecting", "_ready_inflight", "is_host_opening"))
+            "is_connecting", "_ready_inflight", "is_host_opening", "_game_configuring"))
 
     def set_task_controls_enabled(self, enabled):
         for name in ("combo_batch", "ent_subtask", "ent_start_num", "ent_total",
                      "ent_full_task", "btn_inject_task", "btn_auto_fix", "ent_round_seconds",
                      "ent_random_spread", "ent_cooldown_seconds", "ent_target_players", "check_hud_enabled",
-                     "check_hud_timer", "check_hud_task", "check_hud_roster"):
+                     "check_hud_timer", "check_hud_task", "check_hud_roster", "check_action_prompt"):
             widget = getattr(self, name, None)
             if widget:
                 widget.config(state="normal" if enabled else "disabled")
+        selector = getattr(self, "combo_game", None)
+        if selector is not None:
+            selector.config(state="readonly" if enabled and not self.room_code and self.current_mode == "HOST" else "disabled")
 
     def hide_host_choices(self):
         panel = getattr(self, "frame_host_choices", None)
         if panel is not None:
             panel.pack_forget()
+
+    def plan_action_prompt(self, task_id, renew=False):
+        if self.current_mode != "HOST" or not self.valid_task_id(task_id):
+            return None
+        plans = getattr(self, "_action_prompt_plans", None)
+        if plans is None:
+            plans = self._action_prompt_plans = {}
+        upper = min(130, self.round_target_duration(task_id) - 1)
+        if upper < 125:
+            plans.pop(task_id, None)
+            return None
+        nonce = getattr(self, "_sync_start_nonce", None) if getattr(self, "_sync_start_task", None) == task_id else None
+        cue_id = f"{task_id}:{nonce or 'native'}"
+        previous = plans.get(task_id)
+        if (renew or previous is None or previous["cue_id"] != cue_id
+                or not 125 <= previous["at"] <= upper):
+            plans[task_id] = {"at": random.randint(125, upper), "cue_id": cue_id}
+            if len(plans) > 128:
+                plans.pop(next(iter(plans)))
+        return plans[task_id]["at"]
+
+    def action_prompt_at(self, task_id):
+        if not self.config.get("action_prompt_enabled", True):
+            return None
+        plan = getattr(self, "_action_prompt_plans", {}).get(task_id)
+        return plan["at"] if plan is not None else None
+
+    def remember_shared_action_prompt(self, settings):
+        task, at = settings.get("task_id"), settings.get("action_prompt_at_seconds")
+        if not task or not self.valid_task_id(task):
+            return
+        if not hasattr(self, "_action_prompt_plans"):
+            self._action_prompt_plans = {}
+        if type(at) is not int or not 125 <= at <= 130:
+            self._action_prompt_plans.pop(task, None)
+            return
+        self._action_prompt_plans[task] = {"at": at, "cue_id": f"{task}:{settings.get('start_request_id') or 'native'}"}
+        if len(self._action_prompt_plans) > 128:
+            self._action_prompt_plans.pop(next(iter(self._action_prompt_plans)))
+
+    def maybe_show_action_prompt(self, task_id, elapsed, target):
+        with self._action_lock:
+            active = self.is_recording if self.current_mode == "HOST" else self.is_player_recording
+            if (not self.is_running or not active or self.is_stopping or self.is_validating
+                    or self.follower.current_recording != task_id
+                    or not self.config.get("hud_enabled", True)
+                    or not self.config.get("action_prompt_enabled", True)):
+                return False
+            plan = getattr(self, "_action_prompt_plans", {}).get(task_id)
+            if plan is None or elapsed < plan["at"]:
+                return False
+            seen = getattr(self, "_action_prompt_seen", None)
+            if seen is None:
+                seen = self._action_prompt_seen = {}
+            identity = task_id, plan["cue_id"]
+            if identity in seen:
+                return False
+            seen[identity] = True
+            if len(seen) > 128:
+                seen.pop(next(iter(seen)))
+            if elapsed >= target or elapsed > min(130.5, plan["at"] + 5):
+                self.log(f"Bỏ nhắc hành động [{task_id}]: đã qua mốc đồng bộ {plan['at']}s.", "WAIT")
+                return False
+            queued = self.overlay.show_action_change(task_id, duration_sec=5, cue_id=plan["cue_id"])
+            if queued:
+                self.log(f"THAY ĐỔI HÀNH ĐỘNG [{task_id}] tại {elapsed:.1f}s (Host chọn {plan['at']}s).", "HUD")
+            return bool(queued)
+
+    def player_action_prompt_tick(self, generation, task, round_token, started, target):
+        if (generation != self._player_connection_generation or self._player_round_token != round_token
+                or self.current_mode != "PLAYER" or started is None):
+            return
+        self.maybe_show_action_prompt(task, max(0, time.monotonic() - started), target)
 
     def round_target_duration(self, task_id):
         shared = getattr(self, "_shared_settings", {})
@@ -1039,14 +1136,93 @@ class OdxAutoPilotGUI:
             values[key] = value
         if values["random_offset_seconds"] >= values["round_duration_seconds"]:
             raise ValueError("Khoảng random phải nhỏ hơn thời lượng quay.")
-        for field in ("hud_enabled", "hud_show_timer", "hud_show_task", "hud_show_roster"):
+        for field in ("hud_enabled", "hud_show_timer", "hud_show_task", "hud_show_roster", "action_prompt_enabled"):
             variable = getattr(self, "var_" + field, None)
             values[field] = bool(variable.get()) if variable is not None else bool(self.config.get(field, True))
         values["test_mode"] = self.capture_test_mode()
+        values["game_selection"] = self.selected_game()
+        values["record_audio"] = True
         return values
 
     def capture_test_mode(self):
         return self.config.get("test_mode", False) is True
+
+    def selected_game(self):
+        selected = self.config.get("game_selection")
+        if selected in ("arma3", "arma-reforger"):
+            return selected
+        return "arma3" if "arma3" in str(self.config.get("game_process", "")).lower() else "arma-reforger"
+
+    def selected_game_name(self):
+        return "Arma 3" if self.selected_game() == "arma3" else "Arma Reforger"
+
+    def selected_game_running(self):
+        return games.game_process_running(self.selected_game())
+
+    def prepare_selected_capture_launch(self, test_mode, game_selection=None):
+        ok, error = be.prepare_capture_mode_launch(test_mode)
+        if not ok:
+            return ok, error
+        return (games.prepare_audio_capture_launch() if test_mode else
+                games.prepare_game_capture_launch(game_selection or self.selected_game()))
+
+    def cancel_game_configuration(self):
+        event = getattr(self, "_game_config_cancel", None)
+        if event is not None:
+            event.set()
+        self._game_config_generation = getattr(self, "_game_config_generation", 0) + 1
+        self._game_config_cancel = None
+        self._game_configuring = False
+
+    def on_game_selection_changed(self):
+        if (self.current_mode != "HOST" or self.operation_busy() or self.room_code
+                or self.player_connection_active):
+            self.var_game_selection.set(self.selected_game_name())
+            self.log("Chọn game trước khi tạo room; giữ nguyên phiên Odx hiện tại.", "WAIT")
+            return
+        selected = {"Arma 3": "arma3", "Arma Reforger": "arma-reforger"}.get(self.var_game_selection.get())
+        if selected is None:
+            self.var_game_selection.set(self.selected_game_name())
+            return
+        self.config.update(game_selection=selected, record_audio=True,
+                           game_process="arma3_x64" if selected == "arma3" else "ArmaReforgerSteam")
+        self.save_config()
+        self.log(f"Đã chọn {self.selected_game_name()}; tự quét nguồn quay, hồ sơ game và bật âm thanh.", "GAME")
+        if self.capture_test_mode() or not self.owned_odx_window():
+            return
+        self.cancel_game_configuration()
+        generation = self._game_config_generation
+        cancel_event = threading.Event()
+        self._game_config_cancel = cancel_event
+        self._game_configuring = True
+
+        def status(message, tag="WAIT"):
+            if not cancel_event.is_set():
+                self.log(message, tag)
+
+        def worker():
+            result, error = None, ""
+            try:
+                result = games.set_game_capture(selected, timeout=30, cancel_event=cancel_event, on_status=status)
+                if result is None:
+                    raise RuntimeError("Không khởi tạo được bộ chọn nguồn game.")
+                result.join()
+                if not result.success:
+                    error = result.error
+            except Exception as exc:
+                error = str(exc)
+            self.post_ui(self.finish_game_configuration, generation, selected, error)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def finish_game_configuration(self, generation, selected, error):
+        if generation != self._game_config_generation or not self.is_running:
+            return
+        self._game_configuring = False
+        self._game_config_cancel = None
+        text = (f"CHƯA CHỌN ĐƯỢC NGUỒN GAME: {error}" if error else
+                f"ĐÃ CHỌN {self.selected_game_name()} + NGUỒN QUAY + GHI ÂM")
+        self.lbl_host_status.config(text=text, fg=ModernTheme.ACCENT_AMBER if error else ModernTheme.ACCENT_GREEN)
+        self.log(text, "ERROR" if error else "GAME")
 
     def on_test_mode_changed(self):
         if self.operation_busy() or self.room_code or self.player_connection_active:
@@ -1060,7 +1236,7 @@ class OdxAutoPilotGUI:
         self.log("Đã bật TEST: quay màn hình chính, không cần game; không tính tiến độ sản xuất."
                  if self.capture_test_mode() else "Đã tắt TEST; quay game theo cấu hình thông thường.", "MODE")
 
-    def configure_capture_mode_for_room(self, enabled, current):
+    def configure_capture_mode_for_room(self, enabled, current, game_selection=None):
         """Configure the owned native UI before its room snapshots the source."""
         mode = self.current_mode
 
@@ -1098,12 +1274,28 @@ class OdxAutoPilotGUI:
                 raise RuntimeError("Phiên kết nối đã bị hủy.")
             if not worker or not getattr(worker, "success", False):
                 raise RuntimeError(getattr(worker, "error", "") or "Không xác nhận được nguồn quay màn hình trên Odx.")
+            worker = (games.ensure_capture_audio(timeout=30, cancel_event=cancel_event, on_status=on_status)
+                      if enabled else games.set_game_capture(game_selection or self.selected_game(), timeout=30,
+                                                           cancel_event=cancel_event, on_status=on_status))
+            deadline = time.monotonic() + 32
+            if worker:
+                worker.join(timeout=.1)
+                while worker.is_alive():
+                    if not current() or time.monotonic() >= deadline:
+                        raise RuntimeError("Hết phiên hoặc hết thời gian chờ chọn game/ghi âm trên Odx.")
+                    worker.join(timeout=.1)
+            if not current():
+                raise RuntimeError("Phiên kết nối đã bị hủy.")
+            if not worker or not getattr(worker, "success", False):
+                raise RuntimeError(getattr(worker, "error", "") or "Chưa xác nhận nguồn game/hồ sơ game/ghi âm.")
         finally:
             cancel_event.set()
 
     def room_capture_mode_matches(self):
         configured = getattr(self, "_room_test_mode", None)
-        return configured == self.capture_test_mode() if configured is not None else not self.capture_test_mode()
+        test_matches = configured == self.capture_test_mode() if configured is not None else not self.capture_test_mode()
+        room_game = getattr(self, "_room_game_selection", None)
+        return test_matches and (self.capture_test_mode() or room_game is None or room_game == self.selected_game())
 
     def expected_players(self):
         return max(1, min(4, int(self.config.get("target_players", 4))))
@@ -1128,11 +1320,19 @@ class OdxAutoPilotGUI:
     def host_settings_snapshot(self):
         self.config.update(self.read_shared_controls())
         task = self.active_task_id
+        if (getattr(self, "_sync_start_task", None) == task
+                and getattr(self, "_sync_start_after", None) is not None):
+            # Revalidate a pending cue before publishing the revision Players
+            # acknowledge, if duration controls changed while waiting for them.
+            self.plan_action_prompt(task)
         return dict(
             **{key: self.config[key] for key in ("round_duration_seconds", "random_offset_seconds",
                 "cooldown_between_rounds_seconds", "target_players")},
             random_enabled=bool(self.config.get("random_enabled", True)), random_algorithm="task-md5-v1",
             test_mode=self.capture_test_mode(),
+            game_selection=self.selected_game(), record_audio=True,
+            action_prompt_enabled=bool(self.config.get("action_prompt_enabled", True)),
+            action_prompt_at_seconds=self.action_prompt_at(task),
             task_id=task, target_duration=self.round_target_duration(task), current_batch=self.combo_batch.get(),
             sub_task=self.ent_subtask.get(), start_num=int(self.ent_start_num.get()),
             total_tasks=int(self.ent_total.get()), auto_increment=bool(self.var_autoincrement.get()),
@@ -1218,6 +1418,12 @@ class OdxAutoPilotGUI:
                 self._sync_applied_revision = self._sync_applied_instance = None
                 self.lbl_player_sync.config(text="Chế độ quay khác Host; hãy đóng tool rồi mở lại để kết nối đúng chế độ.", fg=ModernTheme.ACCENT_RED)
                 return
+            room_game = getattr(self, "_room_game_selection", None)
+            if (not settings.get("test_mode", False) and room_game is not None
+                    and settings.get("game_selection", room_game) != room_game):
+                self._sync_applied_revision = self._sync_applied_instance = None
+                self.lbl_player_sync.config(text="Game trong room khác Host; kết nối lại đúng cấu hình game trước khi Ready.", fg=ModernTheme.ACCENT_RED)
+                return
             self._shared_settings = settings
             task = settings.get("task_id")
             if task and settings.get("target_duration"):
@@ -1226,10 +1432,13 @@ class OdxAutoPilotGUI:
                     self._shared_targets.pop(next(iter(self._shared_targets)))
             for field in ("test_mode", "round_duration_seconds", "random_offset_seconds", "random_enabled", "target_players",
                           "cooldown_between_rounds_seconds", "hud_enabled", "hud_show_timer", "hud_show_task",
-                          "hud_show_roster", "hud_scale", "hud_opacity", "hud_language"):
+                          "hud_show_roster", "hud_scale", "hud_opacity", "hud_language", "game_selection",
+                          "record_audio", "action_prompt_enabled"):
                 if field in settings:
                     self.config[field] = settings[field]
+            self.remember_shared_action_prompt(settings)
             self.overlay.set_preferences(settings)
+            self.consider_player_round_recovery(settings)
             self.refresh_tracker_settings()
             self._sync_applied_revision = envelope["revision"]
             self._sync_applied_instance = envelope["instance_id"]
@@ -1256,7 +1465,7 @@ class OdxAutoPilotGUI:
             player_id = str(self.config.get("player_id", ""))
             threading.Thread(target=client.acknowledge, args=(revision, player_id), daemon=True).start()
         prefix = "[TEST màn hình] " if self.capture_test_mode() else ""
-        self.lbl_player_sync.config(text=prefix + "Đã đồng bộ cấu hình và thời lượng từ Host", fg=ModernTheme.ACCENT_GREEN)
+        self.lbl_player_sync.config(text=prefix + f"Đã đồng bộ Host · {self.selected_game_name()} · Ghi âm tự bật", fg=ModernTheme.ACCENT_GREEN)
         if envelope is not None:
             self.root.after(0, self.auto_ready_player_next_round)
 
@@ -1322,6 +1531,8 @@ class OdxAutoPilotGUI:
         if (getattr(self.follower, "current_recording", None)
                 or getattr(self.follower, "last_armed", None)):
             return False
+        if self.player_blocking_room_error():
+            return False
         if not self.synced_settings_ready(allow_finished_task=True):
             return False
         configured_id = str(self.config.get("player_id", player_id)).strip()
@@ -1369,7 +1580,7 @@ class OdxAutoPilotGUI:
             except Exception as exc:
                 self.log(f"Kiểm tra hệ thống: {exc}", "WARN")
             while self.is_running:
-                game = be.is_game_running("ArmaReforgerSteam")
+                game = self.selected_game_running()
                 self.post_ui(self.badge_game.config, text="Game: [ĐANG CHẠY]" if game else "Game: [CHƯA MỞ]")
                 if self.odx_opened and self.current_mode == "HOST" and time.time() - getattr(self, "odx_launch_time", 0) > 10 and not be.find_odx_window():
                     if not self.operation_busy():
@@ -1775,6 +1986,7 @@ class OdxAutoPilotGUI:
         # operator clicked this button again.
         self._host_launch_generation = getattr(self, "_host_launch_generation", 0) + 1
         self._room_test_mode = self.capture_test_mode()
+        self._room_game_selection = self.selected_game()
         generation = self._host_launch_generation
         cancel_event = threading.Event()
         self._host_room_cancel_event = cancel_event
@@ -1802,7 +2014,7 @@ class OdxAutoPilotGUI:
             if not existing:
                 process = getattr(self, "_host_process", None)
                 if process is None or process.poll() is not None:
-                    ok, error = be.prepare_capture_mode_launch(self.capture_test_mode())
+                    ok, error = self.prepare_selected_capture_launch(self.capture_test_mode())
                     if not ok:
                         raise RuntimeError(error)
                     be.set_task_box(self.active_task_id)
@@ -1894,9 +2106,11 @@ class OdxAutoPilotGUI:
             self.tracker.stop()
 
         def _on_roster_update(rc, host_id, members):
+            snapshot = dict(getattr(self.tracker, "latest_data", None) or {"members": members})
             def _update():
                 try:
-                    ready_cnt = sum(1 for idx, m in enumerate(members) if not m.get("problem") and (m.get("ready") or (str(m.get("player_id")) == str(host_id) or (idx == 0 and not host_id))))
+                    errors = self.report_room_errors(snapshot)
+                    ready_cnt = sum(1 for idx, m in enumerate(members) if not self.current_member_problem(m) and (m.get("ready") or (str(m.get("player_id")) == str(host_id) or (idx == 0 and not host_id))))
                     expected = self.expected_players()
                     all_ready = (len(members) == expected and ready_cnt == expected)
 
@@ -1907,13 +2121,19 @@ class OdxAutoPilotGUI:
                             pname = str(m.get("name") or m.get("player_id"))
                             is_h = (str(m.get("player_id")) == str(host_id) or (idx == 0 and not host_id))
                             tag = "[H] " if is_h else ""
-                            ready = not m.get("problem") and (is_h or m.get("ready"))
-                            st = "✓ SẴN SÀNG" if ready else str(m.get("problem") or ".. Đang chờ")
-                            col = ModernTheme.ACCENT_GREEN if ready else ModernTheme.ACCENT_AMBER
+                            problem = self.current_member_problem(m)
+                            previous_error = any(item.get("task_id") and item.get("player_id") == str(m.get("player_id")) for item in errors)
+                            ready = not problem and (is_h or m.get("ready"))
+                            st = "LỖI" if problem else "Sẵn sàng · lỗi vòng trước" if ready and previous_error else "Lỗi vòng trước" if previous_error else "✓ SẴN SÀNG" if ready else ".. Đang chờ"
+                            col = ModernTheme.ACCENT_RED if problem or previous_error else ModernTheme.ACCENT_GREEN if ready else ModernTheme.ACCENT_AMBER
                             self.slot_labels[idx].config(text=f"{tag}{pname}: {st}", fg=col)
                         else:
                             self.slot_labels[idx].config(text=f"Slot {idx+1}: Trống...", fg=ModernTheme.TEXT_MUTED)
 
+                    if errors:
+                        if not self.is_stopping:
+                            self.lbl_host_status.config(text="ODX BÁO LỖI: " + self.describe_room_errors(errors), fg=ModernTheme.ACCENT_RED)
+                        return
                     if self.operation_busy() or self.is_in_cooldown or self.abort_state:
                         return
                     if all_ready:
@@ -1928,7 +2148,7 @@ class OdxAutoPilotGUI:
                 pass
 
         self.tracker = be.RoomTracker(room_code, overlay=self.overlay, on_change_callback=_on_roster_update,
-                                      expected_players=self.expected_players())
+                                      expected_players=self.expected_players(), follower=self.follower)
         self.tracker.start()
 
     def host_trigger_start(self):
@@ -1963,7 +2183,7 @@ class OdxAutoPilotGUI:
         if not self.room_capture_mode_matches():
             self.log("Nguồn quay chưa được xác nhận; giữ nguyên Odx và thử Làm mới kết nối. Đổi chế độ cần đóng/mở lại tool.", "ERROR")
             return
-        if not self.capture_test_mode() and not be.is_game_running(self.config.get("game_process", "ArmaReforgerSteam")):
+        if not self.capture_test_mode() and not self.selected_game_running():
             self.log("Game chưa chạy; chưa phát lệnh quay.", "WARN")
             return
         hwnd = be.find_odx_window()
@@ -1985,6 +2205,16 @@ class OdxAutoPilotGUI:
             return
         members = room_data["members"]
         host_id = room_data.get("host")
+        current_errors = [dict(task_id="", player_id=str(member.get("player_id") or ""),
+                               name=str(member.get("name") or member.get("player_id") or "Odx"),
+                               message=self.current_member_problem(member))
+                          for member in members if self.current_member_problem(member)]
+        if current_errors:
+            self.report_room_errors(room_data)
+            detail = self.describe_room_errors(current_errors)
+            self.lbl_host_status.config(text="CHƯA CHO QUAY: " + detail, fg=ModernTheme.ACCENT_RED)
+            self.log("Chặn bắt đầu vì Odx báo lỗi thành viên: " + detail, "ERROR")
+            return
         unready = [str(m.get("name") or m.get("player_id")) for idx, m in enumerate(members)
                    if not ((str(m.get("player_id")) == str(host_id)) or (idx == 0 and not host_id))
                    and not m.get("ready")]
@@ -2017,6 +2247,7 @@ class OdxAutoPilotGUI:
                     self._sync_start_task = self.active_task_id
                     self._sync_start_after = time.monotonic()
                     self._sync_start_nonce = secrets.token_hex(16)
+                    self.plan_action_prompt(self.active_task_id, renew=True)
                 revision = server.publish(self.host_settings_snapshot())
                 waiting = {str(m.get("player_id")) for m in members
                            if str(m.get("player_id")) != str(host_id)} - server.applied_players(revision, after=self._sync_start_after)
@@ -2030,6 +2261,7 @@ class OdxAutoPilotGUI:
                 self.log(f"Chờ Player áp dụng cấu hình bản {revision}: {', '.join(sorted(waiting))}.", "WAIT")
                 return
         task_id = self.active_task_id
+        self.plan_action_prompt(task_id)
         self.original_task_before_abort = re.sub(r"-fix\d+$", "", task_id)
         self.target_duration = self.round_target_duration(task_id)
         self.rec_start_time = 0
@@ -2078,12 +2310,17 @@ class OdxAutoPilotGUI:
             hwnd = self.owned_odx_window()
             if not hwnd or not be.is_managed_odx_window(hwnd) or not self.room_capture_mode_matches():
                 raise RuntimeError("Odx hoặc nguồn quay thay đổi; không phát lệnh quay.")
-            if not self.capture_test_mode() and not be.is_game_running(self.config.get("game_process", "ArmaReforgerSteam")):
+            if not self.capture_test_mode() and not self.selected_game_running():
                 raise RuntimeError("Game hoặc Odx đã đóng; không phát lệnh quay.")
             if not self.tracker or not self.tracker.is_all_ready(expected=self.expected_players()):
                 raise RuntimeError("Trạng thái phòng thay đổi trong lúc chuẩn bị; chưa phát lệnh quay.")
             if (self.tracker.latest_data or {}).get("current_session"):
                 raise RuntimeError("Phòng vẫn đang xử lý round trước; chưa phát lệnh quay.")
+            problems = [(member.get("name") or member.get("player_id"), self.current_member_problem(member))
+                        for member in (self.tracker.latest_data or {}).get("members", [])
+                        if self.current_member_problem(member)]
+            if problems:
+                raise RuntimeError("Odx báo lỗi thành viên: " + "; ".join(f"{name}: {detail}" for name, detail in problems))
             if not self.ensure_host_hotkey_priority():
                 raise RuntimeError("Chưa xác nhận quyền xử lý F10 trước Odx; chưa phát lệnh quay.")
             with self._action_lock:
@@ -2180,6 +2417,7 @@ class OdxAutoPilotGUI:
         anchor = time.monotonic() if started_at is None else float(started_at)
         self._round_start_epoch = time.time() + anchor - time.monotonic()
         self.active_task_id = task_id
+        self.plan_action_prompt(task_id)
         self.task_id_override = task_id
         self.target_duration = self.round_target_duration(task_id)
         if anchor > time.monotonic():
@@ -2525,11 +2763,18 @@ class OdxAutoPilotGUI:
                 return
             is_pass, error = audit.passed, audit.error or None
             duration_seconds = getattr(audit, "duration_seconds", None)
-            deadline = time.monotonic() + 15
+            deadline = time.monotonic() + 120
             while self.is_running and token == self._transition_token and time.monotonic() < deadline:
                 self.follower.check_new_lines()
                 result = self.follower.last_round_result
-                if self.follower.last_all_ok == task_id or (result and result[0] == task_id and "all ok" in str(result[1]).lower()):
+                outcome = getattr(self.follower, "get_round_outcome", None)
+                state, detail = outcome(task_id) if callable(outcome) else ("pending", "")
+                if state in ("failed", "cancelled"):
+                    error = detail or "Odx yêu cầu quay lại round; chưa nhận ALL OK."
+                    break
+                if (state == "all_ok" or (not callable(outcome) and
+                        (self.follower.last_all_ok == task_id or (result and result[0] == task_id
+                         and str(result[1]).strip().lower() == "all ok")))):
                     all_ok = True
                     break
                 if result and result[0] == task_id and any(word in str(result[1]).lower() for word in ("failed", "record again", "not done")):
@@ -2807,6 +3052,7 @@ class OdxAutoPilotGUI:
                     return (self.is_running and generation == self._player_connection_generation
                             and not cancel_event.is_set())
                 test_mode = False
+                game_selection = self.selected_game()
                 if getattr(self, "_sync_required", False):
                     host = str(data.get("host") or "")
                     if not host:
@@ -2823,6 +3069,9 @@ class OdxAutoPilotGUI:
                     if settings is None:
                         raise RuntimeError("Chưa lấy được cấu hình Host trước khi vào room; kiểm tra ô IP Host và cổng 45455.")
                     test_mode = settings.get("test_mode", False) is True
+                    game_selection = settings.get("game_selection", game_selection)
+                    if game_selection not in ("arma3", "arma-reforger"):
+                        raise RuntimeError("Game đồng bộ từ Host không hợp lệ.")
                 if not current():
                     return
                 existing = be.find_odx_window()
@@ -2832,17 +3081,18 @@ class OdxAutoPilotGUI:
                 be.set_clipboard(rcode)
                 if not existing:
                     exe = self.odx_gui_executable()
-                    ok, error = be.prepare_capture_mode_launch(test_mode)
+                    ok, error = self.prepare_selected_capture_launch(test_mode, game_selection)
                     if not ok:
                         raise RuntimeError(error)
                     if not current():
                         return
                     self.player_proc = be.register_managed_process(subprocess.Popen([exe], cwd=be.ODX_ROOT))
-                self.configure_capture_mode_for_room(test_mode, current)
+                self.configure_capture_mode_for_room(test_mode, current, game_selection)
                 if not current():
                     return
                 self._room_test_mode = test_mode
-                self.post_ui(self.apply_player_capture_mode, generation, test_mode)
+                self._room_game_selection = game_selection
+                self.post_ui(self.apply_player_capture_mode, generation, test_mode, game_selection)
                 self.post_ui(self.install_player_tracking, generation, rcode, pid)
                 joining = be.player_auto_join_and_ready(
                     rcode, pid, pname, on_status=_status,
@@ -2866,10 +3116,13 @@ class OdxAutoPilotGUI:
             self.player_connection_failed(generation, str(exc))
             self.finish_player_connection_operation(operation_token)
 
-    def apply_player_capture_mode(self, generation, enabled):
+    def apply_player_capture_mode(self, generation, enabled, game_selection=None):
         if generation != self._player_connection_generation or self.current_mode != "PLAYER":
             return
         self.config["test_mode"] = enabled
+        if game_selection in ("arma3", "arma-reforger"):
+            self.config["game_selection"] = game_selection
+        self.config["record_audio"] = True
         if hasattr(self, "var_test_mode"):
             self.var_test_mode.set(enabled)
         self.overlay.set_preferences(self.config)
@@ -2931,7 +3184,7 @@ class OdxAutoPilotGUI:
         def _roster(room, host_id, members):
             self.post_ui(self.update_player_roster, generation, host_id, members)
         self.tracker = be.RoomTracker(rcode, overlay=self.overlay, on_change_callback=_roster,
-                                      expected_players=self.expected_players())
+                                      expected_players=self.expected_players(), follower=self.follower)
         self.room_code = rcode
         self.tracker.start()
         threading.Thread(target=self.player_follow_worker, args=(generation, rcode, pid), daemon=True).start()
@@ -2939,15 +3192,130 @@ class OdxAutoPilotGUI:
     def update_player_roster(self, generation, host_id, members):
         if generation != self._player_connection_generation:
             return
+        snapshot = dict(getattr(self.tracker, "latest_data", None) or {"members": members})
+        errors = self.report_room_errors(snapshot)
         for index, label in enumerate(self.p_slot_labels):
             if index >= len(members):
                 label.config(text=f"Slot {index + 1}: Chờ...", fg=ModernTheme.TEXT_MUTED)
                 continue
             member = members[index]
             host = str(member.get("player_id")) == str(host_id) or (index == 0 and not host_id)
-            ready = not member.get("problem") and (host or member.get("ready"))
+            problem = self.current_member_problem(member)
+            previous_error = any(item.get("task_id") and item.get("player_id") == str(member.get("player_id")) for item in errors)
+            ready = not problem and (host or member.get("ready"))
             name = member.get("name") or member.get("player_id")
-            label.config(text=f"{name}: {'Sẵn sàng' if ready else 'Chờ'}", fg=ModernTheme.ACCENT_GREEN if ready else ModernTheme.ACCENT_AMBER)
+            state = "LỖI" if problem else "Sẵn sàng · lỗi vòng trước" if ready and previous_error else "Lỗi vòng trước" if previous_error else "Sẵn sàng" if ready else "Chờ"
+            label.config(text=f"{name}: {state}", fg=ModernTheme.ACCENT_RED if problem or previous_error else ModernTheme.ACCENT_GREEN if ready else ModernTheme.ACCENT_AMBER)
+        if errors:
+            self.lbl_p_status.config(text="ODX BÁO LỖI: " + self.describe_room_errors(errors), fg=ModernTheme.ACCENT_RED)
+
+    def current_member_problem(self, member):
+        helper = getattr(be, "member_problem", None)
+        if helper is not None:
+            return helper(member)
+        return str(member.get("problem") or member.get("error") or "").strip()
+
+    def room_error_items(self, data, task=None):
+        helper = getattr(be, "room_member_errors", None)
+        if helper is not None:
+            return helper(data, task)
+        errors = []
+        for member in (data or {}).get("members", []):
+            problem = self.current_member_problem(member)
+            if problem:
+                errors.append(dict(task_id="", player_id=str(member.get("player_id") or ""),
+                                   name=str(member.get("name") or member.get("player_id") or "Odx"), message=problem))
+        errors.extend(item for item in (data or {}).get("_round_errors", [])
+                      if task is None or item.get("task_id") == task)
+        return errors
+
+    def describe_room_errors(self, errors):
+        helper = getattr(be, "format_room_error", None)
+        return "; ".join(helper(item) if helper is not None else
+                         f"{item.get('name') or item.get('player_id') or 'Odx'} ({item.get('player_id') or '-'})"
+                         f" [{item.get('task_id') or 'phòng'}]: {item.get('message')}" for item in errors)
+
+    def report_room_errors(self, data):
+        errors = self.room_error_items(data)
+        signature = tuple((item.get("task_id"), item.get("player_id"), item.get("message")) for item in errors)
+        previous = getattr(self, "_room_problem_sig", ())
+        if signature != previous:
+            self._room_problem_sig = signature
+            for item, key in zip(errors, signature):
+                if key not in previous:
+                    self.log("Odx báo lỗi: " + self.describe_room_errors([item]), "ERROR")
+            if errors:
+                notice = getattr(self.overlay, "show_room_error", None)
+                if notice is not None:
+                    notice(self.describe_room_errors(errors), cue_id=repr(signature))
+                else:
+                    self.overlay.show_roster_hud("ODX BÁO LỖI: " + self.describe_room_errors(errors), ModernTheme.ACCENT_RED, roster=True)
+            elif previous:
+                self.log("Odx đã cập nhật trạng thái phòng; thông báo lỗi trước vẫn được giữ trong log.", "ROOM")
+                clear_notice = getattr(self.overlay, "clear_room_error", None)
+                if clear_notice is not None:
+                    clear_notice()
+        return errors
+
+    def player_round_outcome(self, task):
+        helper = getattr(self.follower, "get_round_outcome", None)
+        if helper is not None:
+            return helper(task)
+        result = getattr(self.follower, "last_round_result", None)
+        if result and result[0] == task:
+            value = str(result[1]).strip()
+            if value.casefold() == "all ok":
+                return "all_ok", ""
+            if value.casefold() == "cancelled":
+                return "cancelled", ""
+            if value.casefold() not in ("", "ok"):
+                return "failed", value
+        if getattr(self.follower, "last_all_ok", None) == task:
+            return "all_ok", ""
+        stopped = getattr(self.follower, "current_stopped", None)
+        if stopped and stopped[0] == task and any(word in str(stopped[1]).casefold() for word in ("cancel", "abort")):
+            return "cancelled", ""
+        return "pending", "Chưa nhận ALL OK của Odx cho round này."
+
+    def player_blocking_room_error(self, task=None):
+        if task is None:
+            failed = getattr(self, "_player_failed_audit", None)
+            proof = getattr(self, "_player_ready_after_round", None)
+            task = (failed[1] if failed else proof[2] if proof else
+                    getattr(self, "_shared_settings", {}).get("task_id"))
+        data = getattr(getattr(self, "tracker", None), "latest_data", None)
+        errors = self.room_error_items(data, task)
+        if errors:
+            return self.describe_room_errors(errors)
+        if task:
+            outcome, detail = self.player_round_outcome(task)
+            if outcome == "failed":
+                return detail or "Odx chưa xác nhận ALL OK."
+        return ""
+
+    def consider_player_round_recovery(self, settings):
+        """A new unused retake can recover; the failed task never gains PASS."""
+        failed = getattr(self, "_player_failed_audit", None)
+        if (self.current_mode != "PLAYER" or not self.player_connection_active or not failed
+                or not self._player_validation_failed or self.operation_busy()
+                or failed[0] != self._player_connection_generation or failed[2] != self._player_round_token
+                or self.follower.current_recording or self.follower.last_armed
+                or settings.get("phase") not in ("idle", "choices")):
+            return False
+        task = settings.get("task_id")
+        if not task or task == failed[1] or not self.valid_task_id(task):
+            return False
+        try:
+            exists, _ = be.is_task_already_recorded(task)
+        except Exception:
+            return False
+        if exists or self.player_blocking_room_error(task):
+            return False
+        self._player_validation_failed = False
+        self._player_failed_audit = None
+        self._player_ready_after_round = None
+        self.log(f"Host đã chọn task mới [{task}]; cho phép sẵn sàng quay lại. Task [{failed[1]}] giữ nguyên kết quả lỗi.", "PLAYER")
+        return True
 
     def player_follow_worker(self, generation, rcode, pid):
         recording, preparing, task, started = False, False, "", None
@@ -3026,6 +3394,7 @@ class OdxAutoPilotGUI:
                 elapsed = time.monotonic() - started
                 self.overlay.update_recording(task, elapsed, target, blink=(int(elapsed) % 2 == 0), is_host=False)
                 self.post_ui(self.player_clock_state, generation, task, started, True, elapsed)
+                self.post_ui(self.player_action_prompt_tick, generation, task, round_token, started, target)
                 if elapsed > target + 10 and not warned_timeout:
                     warned_timeout = True
                     self.log("Chưa nhận xác nhận dừng từ Host; chưa tự đánh dấu hoàn tất hoặc bật Ready.", "WARN")
@@ -3100,10 +3469,6 @@ class OdxAutoPilotGUI:
                          args=(generation, task, round_token, cancelled), daemon=True).start()
 
     def post_player_round(self, generation, task, round_token, cancelled=False):
-        if cancelled:
-            self.log(f"Task [{task}] đã kết thúc sớm hoặc bị hủy; chờ lựa chọn từ Host, không tự gắn PASS.", "CANCEL")
-            self.post_ui(self.finish_player_validation, generation, task, round_token, True, True)
-            return
         def current():
             return (self.is_running and generation == self._player_connection_generation
                     and round_token == self._player_round_token
@@ -3113,24 +3478,54 @@ class OdxAutoPilotGUI:
         ok, error = False, ""
         duration_seconds = None
         try:
-            audit = be.validate_finalized_capture(task, self.follower, should_continue=current,
-                                                on_message=lambda line: self.log(line, "AUDIT"))
-            if audit.cancelled or not current():
-                return
-            ok, error = audit.passed, audit.error
-            duration_seconds = getattr(audit, "duration_seconds", None)
-            self.log(f"Kiểm định máy con [{'PASS' if ok else 'FAIL'}]: [{task}]", "SUCCESS" if ok else "WARN")
+            if cancelled:
+                self.log(f"Task [{task}] đã kết thúc sớm hoặc bị hủy; chờ kết quả Odx và lựa chọn từ Host, không tự gắn PASS.", "CANCEL")
+                ok = True
+            else:
+                audit = be.validate_finalized_capture(task, self.follower, should_continue=current,
+                                                    on_message=lambda line: self.log(line, "AUDIT"))
+                if audit.cancelled or not current():
+                    return
+                ok, error = audit.passed, audit.error
+                duration_seconds = getattr(audit, "duration_seconds", None)
+                self.log(f"Kiểm định máy con [{'PASS CỤC BỘ' if ok else 'FAIL'}]: [{task}]", "AUDIT" if ok else "WARN")
+            if ok:
+                deadline, next_notice = time.monotonic() + 120, 0
+                while current():
+                    self.follower.check_new_lines()
+                    outcome, detail = self.player_round_outcome(task)
+                    problem = self.player_blocking_room_error(task)
+                    if problem or outcome == "failed":
+                        ok, error = False, problem or detail or "Odx báo lỗi round."
+                        self.log(f"Odx chưa đạt [{task}]: {error}", "ERROR")
+                        break
+                    if outcome == "all_ok" or (cancelled and outcome == "cancelled"):
+                        break
+                    now = time.monotonic()
+                    if now >= deadline:
+                        ok, error = False, f"Odx chưa xác nhận {'kết thúc' if cancelled else 'ALL OK'} cho [{task}] sau 120 giây; có thể kiểm định lại khi render xong."
+                        break
+                    if now >= next_notice:
+                        next_notice = now + 5
+                        self.log(f"Chờ Odx render và xác nhận ALL OK [{task}]; chưa bật Ready.", "WAIT")
+                    time.sleep(0.2)
         except Exception as exc:
+            ok = False
             error = str(exc)
             self.log(f"Kiểm định máy con lỗi: {exc}", "ERROR")
         if current():
-            self.post_ui(self.finish_player_validation, generation, task, round_token, bool(ok), False, error, duration_seconds)
+            self.post_ui(self.finish_player_validation, generation, task, round_token, bool(ok), cancelled, error, duration_seconds)
 
     def finish_player_validation(self, generation, task, round_token, ok, cancelled=False, error="", duration_seconds=None):
         if (generation != self._player_connection_generation or
                 self._player_validation_token != (generation, task, round_token) or
                 self._player_round_token != round_token):
             return
+        if ok:
+            outcome, detail = self.player_round_outcome(task)
+            problem = self.player_blocking_room_error(task)
+            if problem or (outcome != "all_ok" and not (cancelled and outcome == "cancelled")):
+                ok, error = False, problem or detail or "Odx chưa xác nhận ALL OK cho round này."
         self.is_validating = False
         self._player_validation_token = None
         self._player_validation_failed = not ok
@@ -3141,7 +3536,7 @@ class OdxAutoPilotGUI:
             self._player_failed_audit = None
             self._player_ready_after_round = (generation, round_token, task)
             prefix = "[TEST] " if getattr(self, "_round_test_mode", False) else ""
-            self.lbl_p_status.config(text=f"{prefix}{'ĐÃ HỦY' if cancelled else 'PASS CỤC BỘ'} [{task}] - CHỜ HOST", fg=ModernTheme.ACCENT_GREEN)
+            self.lbl_p_status.config(text=f"{prefix}{'ĐÃ HỦY' if cancelled else 'PASS CỤC BỘ + ODX ALL OK'} [{task}] - CHỜ HOST", fg=ModernTheme.ACCENT_GREEN)
             self.btn_p_connect.config(state="disabled", text=f"ĐÃ KẾT NỐI [{self.room_code}]")
             self.auto_ready_player_next_round()
         else:
@@ -3153,6 +3548,10 @@ class OdxAutoPilotGUI:
 
     def auto_ready_player_next_round(self):
         if self.current_mode != "PLAYER" or self.operation_busy() or self._player_validation_failed or getattr(self, "_ready_inflight", False):
+            return
+        problem = self.player_blocking_room_error()
+        if problem:
+            self.lbl_p_status.config(text="CHƯA BẬT READY: " + problem, fg=ModernTheme.ACCENT_RED)
             return
         if not self.tracker or not self.tracker.latest_data or self.tracker.latest_data.get("current_session"):
             return
@@ -3215,6 +3614,10 @@ class OdxAutoPilotGUI:
                 or self.is_player_recording or self.p_counting_down or self.is_validating):
             return
         status = str(getattr(result, "status", "")) if result is not None else ""
+        problem = self.player_blocking_room_error()
+        if problem:
+            self.lbl_p_status.config(text="CHƯA BẬT READY: " + problem, fg=ModernTheme.ACCENT_RED)
+            return
         if status in {"cancelled", "recording", "busy"}:
             return
         if result is not None and getattr(result, "success", False) is True:
@@ -3565,6 +3968,7 @@ class OdxAutoPilotGUI:
             else:
                 self.overlay.update_recording(self.active_task_id, elapsed, self.target_duration, blink=(int(elapsed) % 2 == 0), is_host=True)
             if active:
+                self.maybe_show_action_prompt(self.active_task_id, elapsed, self.target_duration)
                 self.prepare_host_stop_if_needed(elapsed)
             if (elapsed >= self.target_duration and not self.is_stopping
                     and active and not self.capture_state_unknown and not self._stop_confirmation_failed):
@@ -3732,7 +4136,7 @@ class OdxAutoPilotGUI:
         self._transition_token += 1
         self._player_connection_generation += 1
         preferences = getattr(self, "window_preferences", None)
-        actions = [self.cancel_prepared_host_stop, self.stop_settings_sync, self.cancel_host_room_creation,
+        actions = [self.cancel_game_configuration, self.cancel_prepared_host_stop, self.stop_settings_sync, self.cancel_host_room_creation,
                    lambda: self.cancel_player_ready(cancel_connection=True)]
         if preferences is not None:
             actions.insert(0, preferences.close)

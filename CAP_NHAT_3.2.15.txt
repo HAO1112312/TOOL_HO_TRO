@@ -1,0 +1,27 @@
+ODX CAPTURE AUTO-PILOT v3.2.15 — 2026-11-25
+
+- Mỗi round, Host chọn một mốc ngẫu nhiên 02:05–02:10 từ lúc recorder ghi thật.
+  Host và Player cùng hiện “THAY ĐỔI HÀNH ĐỘNG” lớn giữa màn hình trong 5 giây.
+  Không tính countdown; không lặp theo tick HUD; hủy lời nhắc khi dừng/đổi task.
+  Có dấu chọn bật/tắt trên Host, đồng bộ cùng các tùy chọn HUD. Round quá ngắn
+  không có lời nhắc. Cửa sổ lời nhắc không giành focus và loại khỏi video như HUD.
+- Thêm lựa chọn Arma 3 / Arma Reforger trên Host trước khi tạo room. Mỗi máy
+  tự quét nguồn game thật, chọn đúng hồ sơ và bật ghi âm; Player theo game Host.
+  Chờ giao diện/danh sách tải xong, không nhận placeholder “không chạy”; xác
+  nhận lại lựa chọn trước khi tạo/vào room. Không đổi game trong room đang mở.
+  TEST giữ nguồn màn hình và tự bật âm thanh, không yêu cầu game.
+- Player chỉ tự Ready sau PASS dữ liệu cục bộ ổn định và Odx ALL OK đúng round.
+  Chờ kết quả render thêm tối đa 120 giây, có Kiểm định lại nếu hết hạn. Kết quả
+  lỗi/degraded không thành PASS. Dừng hủy chủ động được phân loại riêng, không
+  tính hoàn tất; lỗi thật vẫn chặn Ready. Host chọn task/-fix mới chưa tồn tại
+  để quay lại mà không xóa hoặc sửa kết quả lỗi cũ.
+- Hiện lỗi thành viên Odx trên tool: tên, task, nguyên nhân, nhãn slot, log và
+  HUD. Đọc báo cáo round đúng task khi file đến muộn, không gắn lỗi vòng trước
+  thành lỗi sức khỏe vĩnh viễn của thành viên.
+- Giữ Odx mở khi lỗi/thử lại/kiểm định/làm mới. Chỉ đóng các tiến trình do tool
+  quản lý khi người dùng đóng tool. Giữ F10 bắt đầu/dừng, F11 chỉ chọn mã -fix,
+  chặn quay trùng và không sửa dữ liệu capture.
+
+Cập nhật cùng bản trên Host và tất cả Player rồi mở lại tool; kiểm tra tiêu đề
+v3.2.15. Gói cập nhật chỉ chứa mã tool/tài liệu/kiểm thử, không chứa Odx native,
+cấu hình riêng, tiến độ, log hoặc capture. Odx hiện dùng bản admin cấp v0.3.8.

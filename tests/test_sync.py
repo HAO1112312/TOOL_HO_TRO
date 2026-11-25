@@ -40,6 +40,21 @@ class SettingsValidationTests(unittest.TestCase):
         clean["task_id"] = "different"
         self.assertEqual(settings["task_id"], "round-01-fix1")
 
+    def test_action_cue_game_and_audio_are_portable_shared_values(self):
+        for game in ("arma3", "arma-reforger"):
+            for at in (None, 125, 130):
+                settings = {"action_prompt_enabled": True, "action_prompt_at_seconds": at,
+                            "game_selection": game, "record_audio": True}
+                self.assertEqual(sync.validate_settings(settings), settings)
+
+    def test_action_cue_and_game_fields_reject_invalid_values(self):
+        for settings in ({"action_prompt_enabled": 1}, {"record_audio": 1},
+                         {"action_prompt_at_seconds": True}, {"action_prompt_at_seconds": 124},
+                         {"action_prompt_at_seconds": 131}, {"action_prompt_at_seconds": 125.0},
+                         {"game_selection": "arma3_x64.exe"}, {"game_selection": "../outside"}):
+            with self.subTest(settings=settings), self.assertRaises(ValueError):
+                sync.validate_settings(settings)
+
 
 class SettingsTransportTests(unittest.TestCase):
     def setUp(self):
@@ -67,6 +82,16 @@ class SettingsTransportTests(unittest.TestCase):
         self.assertGreater(second["revision"], first["revision"])
         self.assertEqual(second["settings"]["task_id"], "task-02")
         self.assertFalse(second["settings"]["hud_enabled"])
+
+    def test_player_receives_one_authoritative_action_time_with_game_and_audio(self):
+        settings = {"task_id": "round-01", "action_prompt_enabled": True,
+                    "action_prompt_at_seconds": 128, "game_selection": "arma3", "record_audio": True}
+        self.server.publish(settings)
+        envelope = self.client.fetch()
+        self.assertEqual(envelope["settings"], settings)
+        self.assertTrue(self.client.acknowledge(envelope["revision"], "PLAYER_1"))
+        self.assertEqual(self.server.publish(dict(settings)), envelope["revision"])
+        self.assertIsNone(self.client.fetch(), "Polling must not invent another random cue/revision")
 
     def test_udp_discovery_uses_room_host_and_unicast_response(self):
         client = sync.PlayerSettingsClient("ABC123", "HOST_TEST", timeout=.4,

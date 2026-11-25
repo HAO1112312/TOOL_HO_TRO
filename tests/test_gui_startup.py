@@ -112,6 +112,18 @@ class GuiStartupTests(unittest.TestCase):
                 self.assertGreaterEqual(button.winfo_height(), button.winfo_reqheight())
                 self.assertLessEqual(button.winfo_x() + button.winfo_width(), row.winfo_width())
 
+    def test_game_and_action_preferences_fit_host_controls_at_supported_widths(self):
+        with self.invisible_layout_app() as (root, app):
+            for width in (880, 1040):
+                with self.subTest(width=width):
+                    root.geometry(f"{width}x1000")
+                    root.update()
+                    root.update_idletasks()
+                    for widget in (app.combo_game, app.check_test_mode, app.check_action_prompt):
+                        self.assertGreaterEqual(widget.winfo_width(), widget.winfo_reqwidth())
+                        self.assertLessEqual(widget.winfo_x() + widget.winfo_width(), widget.master.winfo_width())
+                    self.assertEqual(tuple(app.combo_game.cget("values")), ("Arma 3", "Arma Reforger"))
+
     def test_real_hidden_tk_overlay_constructs_and_shuts_down(self):
         import tkinter as tk
         import odx_gui as gui

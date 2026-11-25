@@ -197,6 +197,7 @@ class ClockAlignmentGuiTests(unittest.TestCase):
         self.gui._player_round_token = 1
         task = self.gui.active_task_id
         self.gui._player_validation_token = (0, task, 1)
+        self.gui.follower.last_round_result = (task, "all ok")
         self.gui.auto_ready_player_next_round = Mock()
         self.gui.finish_player_validation(0, task, 1, True, duration_seconds=241.3)
         self.assertIn("04:01.3 / 04:00.0", self.gui.lbl_p_timer.options["text"])

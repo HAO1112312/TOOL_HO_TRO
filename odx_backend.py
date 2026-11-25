@@ -2933,6 +2933,9 @@ class LiveLogFollower:
         self.last_round_result = None
         self.last_all_ok = None
         self.last_kept_path = None
+        self.round_results = {}
+        self._round_records = {}
+        self._round_file_signatures = {}
         self.id_conflict = None
         self.clock_drift_error = None
         self.task_in_use_error = None
@@ -3058,14 +3061,102 @@ class LiveLogFollower:
         if "is still being recorded or saved" in line:
             self.task_in_use_error = line.strip()
 
-        m_done = re.search(r"round ([a-zA-Z0-9_-]+): (all ok|.*)", line)
+        m_done = re.search(r"round ([a-zA-Z0-9_-]+): (.*)", line)
         if m_done:
             t_name = m_done.group(1).strip()
             t_res = m_done.group(2).strip()
             self.last_round_result = (t_name, t_res)
+            self.round_results[t_name] = t_res
+            if len(self.round_results) > 128:
+                self.round_results.pop(next(iter(self.round_results)))
             self._clear_terminal_capture_activity(t_name)
-            if "all ok" in t_res.lower():
+            if t_res.casefold() == "all ok":
                 self.last_all_ok = t_name
+            elif self.last_all_ok == t_name:
+                self.last_all_ok = None
+
+    def _refresh_round_record(self, task):
+        """Read only the exact task's native result, which arrives after its log."""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(task or "")):
+            return
+        roots = [os.path.join(ODX_ROOT, "data", "captures", task)]
+        kept = self.last_kept_path
+        if (isinstance(kept, str) and os.path.isabs(kept)
+                and os.path.basename(os.path.normpath(kept)) == task):
+            roots.insert(0, kept)
+        seen = set()
+        for root in roots:
+            path = os.path.join(root, "raw", "round.json")
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                stat = os.stat(path)
+                if stat.st_size <= 0 or stat.st_size > 2 * 1024 * 1024:
+                    continue
+                signature = (stat.st_size, stat.st_mtime_ns)
+                if self._round_file_signatures.get(key) == signature:
+                    continue
+                with open(path, "r", encoding="utf-8-sig") as stream:
+                    record = json.load(stream)
+                if (not isinstance(record, dict) or record.get("session_id") != task
+                        or not isinstance(record.get("players"), list)):
+                    continue
+                self._round_records[task] = record
+                self._round_file_signatures[key] = signature
+                if len(self._round_records) > 128:
+                    self._round_records.pop(next(iter(self._round_records)))
+                if len(self._round_file_signatures) > 256:
+                    self._round_file_signatures.pop(next(iter(self._round_file_signatures)))
+                break
+            except (OSError, UnicodeError, ValueError, TypeError):
+                continue
+
+    def get_round_outcome(self, task):
+        """Return (all_ok/failed/cancelled/pending, native detail) for this task."""
+        with self._read_lock:
+            self._refresh_round_record(task)
+            record = self._round_records.get(task)
+            errors = round_record_errors(record, task)
+            if errors:
+                return "failed", "; ".join(format_room_error(item) for item in errors)
+            result = self.round_results.get(task)
+            if result is None and self.last_round_result and self.last_round_result[0] == task:
+                result = str(self.last_round_result[1]).strip()
+            if result is not None:
+                normalized = result.casefold()
+                if normalized == "all ok":
+                    return "all_ok", ""
+                if normalized == "cancelled":
+                    return "cancelled", ""
+                if normalized not in ("", "ok"):
+                    return "failed", result
+            if record and record.get("end_utc_ms") is not None:
+                players = record["players"]
+                if players and all(isinstance(player, dict) and player.get("verdict") == "ok" for player in players):
+                    return "all_ok", ""
+            if self.last_all_ok == task:
+                return "all_ok", ""
+            stopped = self.current_stopped
+            if stopped and stopped[0] == task and any(word in str(stopped[1]).casefold() for word in ("cancel", "abort")):
+                return "cancelled", ""
+            return "pending", "Chưa nhận ALL OK của Odx cho round này."
+
+    def get_round_errors(self, task=None):
+        with self._read_lock:
+            if task is None:
+                task = self.current_recording or self.last_armed or (
+                    self.last_round_result[0] if self.last_round_result else None)
+            if not task:
+                return []
+            self._refresh_round_record(task)
+            errors = round_record_errors(self._round_records.get(task), task)
+            if errors:
+                return errors
+            outcome, detail = self.get_round_outcome(task)
+            return ([dict(task_id=task, player_id="", name="Odx", message=detail, severity="error")]
+                    if outcome == "failed" else [])
 
     def _clear_terminal_capture_activity(self, task):
         """Release only the activity ended by this task's terminal log event."""
@@ -3077,6 +3168,66 @@ class LiveLogFollower:
 # ======================================================================
 # ROOM TRACKING VIA ORCHESTRATOR API
 # ======================================================================
+def member_problem(member):
+    """Current RoomMember health is separate from a previous round's verdict."""
+    if not isinstance(member, dict):
+        return "Dữ liệu thành viên không hợp lệ"
+    problem = member.get("problem") or member.get("error")
+    if problem:
+        return str(problem).strip()[:2000]
+    state = str(member.get("state") or "").strip().casefold()
+    return f"Trạng thái Odx: {state}" if state in {"failed", "error", "capture_failed", "not_done", "not done"} else ""
+
+
+def round_record_errors(record, task):
+    """Read the documented snake_case native RoundRecord/RoundPlayer fields."""
+    if (not isinstance(record, dict) or record.get("session_id") != task
+            or not isinstance(record.get("players"), list)):
+        return []
+    errors = []
+    for player in record["players"]:
+        if not isinstance(player, dict) or player.get("verdict") == "ok":
+            continue
+        verdict = str(player.get("verdict") or "not done")
+        problems = player.get("problems")
+        details = [str(value).strip() for value in problems if isinstance(value, str) and value.strip()] if isinstance(problems, list) else []
+        if player.get("error") and str(player["error"]).strip() not in details:
+            details.append(str(player["error"]).strip())
+        errors.append(dict(task_id=task, player_id=str(player.get("player_id") or ""),
+                           name=str(player.get("name") or player.get("player_id") or "Odx"),
+                           message=(verdict + (": " + "; ".join(details) if details else ""))[:4000],
+                           severity="warning" if verdict == "degraded" else "error"))
+    return errors
+
+
+def format_room_error(item):
+    task = f" [{item['task_id']}]" if item.get("task_id") else ""
+    identity = str(item.get("name") or item.get("player_id") or "Odx")
+    if item.get("player_id") and item.get("name") != item.get("player_id"):
+        identity += f" ({item['player_id']})"
+    return f"{identity}{task}: {item.get('message') or 'Lỗi Odx'}"
+
+
+def room_member_errors(data, task=None):
+    if not isinstance(data, dict):
+        return []
+    errors = []
+    for member in data.get("members", []):
+        problem = member_problem(member)
+        if problem:
+            member = member if isinstance(member, dict) else {}
+            errors.append(dict(task_id="", player_id=str(member.get("player_id") or ""),
+                               name=str(member.get("name") or member.get("player_id") or "Odx"),
+                               message=problem, severity="error"))
+    for item in data.get("_round_errors", []):
+        if isinstance(item, dict) and (task is None or item.get("task_id") == task):
+            errors.append(dict(item))
+    unique = {}
+    for item in errors:
+        unique[(item.get("task_id"), item.get("player_id"), item.get("message"))] = item
+    return list(unique.values())
+
+
 def fetch_room_status(room_code, orchestrator_url=ORCHESTRATOR_URL, access_key=ACCESS_KEY):
     if not room_code:
         return None
@@ -3109,7 +3260,7 @@ def fetch_room_status(room_code, orchestrator_url=ORCHESTRATOR_URL, access_key=A
 def format_member_table(room_code, host_id, members, max_expected=4):
     lines = []
     lines.append("=" * 72)
-    ready_cnt = sum(1 for idx, m in enumerate(members) if m.get("ready") or (str(m.get("player_id")) == str(host_id) or (idx == 0 and not host_id)))
+    ready_cnt = sum(1 for idx, m in enumerate(members) if not member_problem(m) and (m.get("ready") or (str(m.get("player_id")) == str(host_id) or (idx == 0 and not host_id))))
     total_cnt = len(members)
     lines.append(f"  [PHONG: {room_code}] TRANG THAI THANH VIEN REAL-TIME ({ready_cnt}/{max_expected} SAN SANG)")
     lines.append("-" * 72)
@@ -3122,16 +3273,15 @@ def format_member_table(room_code, host_id, members, max_expected=4):
             is_h = (pid == str(host_id)) or (idx == 0 and not host_id)
             role_tag = "[HOST]  " if is_h else "[PLAYER]"
             
-            if is_h:
+            if member_problem(m):
+                st = "[!] LOI: " + member_problem(m)
+            elif is_h:
                 st = "[✓] SAN SANG (HOST TRUONG NHOM)"
             elif m.get("ready"):
                 st = "[✓] SAN SANG (READY)"
             else:
                 st = "[..] DANG CHO (CHUA SAN SANG)"
             
-            if m.get("problem"):
-                st += f"  [!] LOI: {m.get('problem')}"
-                
             p_info = f"{name} (ID: {pid})"
             lines.append(f"  {idx+1}. {role_tag} {p_info:<28} : {st}")
         else:
@@ -3147,24 +3297,26 @@ def format_member_table(room_code, host_id, members, max_expected=4):
 
 def format_hud_roster(room_code, host_id, members, expected=4):
     parts = []
-    ready_cnt = sum(1 for idx, m in enumerate(members) if m.get("ready") or (str(m.get("player_id")) == str(host_id) or (idx == 0 and not host_id)))
+    ready_cnt = sum(1 for idx, m in enumerate(members) if not member_problem(m) and (m.get("ready") or (str(m.get("player_id")) == str(host_id) or (idx == 0 and not host_id))))
     for idx, m in enumerate(members[:4]):
         pid = str(m.get("player_id", ""))
         name = str(m.get("name") or pid)
         is_h = (pid == str(host_id)) or (idx == 0 and not host_id)
         tag = "[H]" if is_h else ""
-        mark = "✓" if (is_h or m.get("ready")) else ".."
-        parts.append(f"{name}{tag}({mark})")
+        problem = member_problem(m)
+        mark = "!" if problem else "✓" if (is_h or m.get("ready")) else ".."
+        parts.append(f"{name}{tag}({mark})" + (f": {problem}" if problem else ""))
     
     joined = " | ".join(parts) if parts else "Dang ket noi..."
     return f"[{room_code}] {joined} [{ready_cnt}/{expected} READY]  [F10: BAT DAU]"
 
 class RoomTracker:
-    def __init__(self, room_code, overlay=None, on_change_callback=None, expected_players=4):
+    def __init__(self, room_code, overlay=None, on_change_callback=None, expected_players=4, follower=None):
         self.room_code = str(room_code).strip().upper()
         self.overlay = overlay
         self.on_change_callback = on_change_callback
         self.expected_players = expected_players
+        self.follower = follower
         self.latest_data = None
         self.last_sig = None
         self.is_running = False
@@ -3204,11 +3356,25 @@ class RoomTracker:
         host_id = data.get("host")
         for idx, m in enumerate(members):
             is_h = (str(m.get("player_id")) == str(host_id)) or (idx == 0 and not host_id)
-            if m.get("problem"):
+            if member_problem(m):
                 return False
             if not is_h and not m.get("ready"):
                 return False
         return True
+
+    @staticmethod
+    def _write_console(message):
+        # A legacy console code page must not turn a healthy API response into
+        # a room/network error and suppress its GUI callback.
+        try:
+            try:
+                sys.stdout.write(message)
+            except UnicodeEncodeError:
+                encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+                sys.stdout.write(message.encode(encoding, errors="replace").decode(encoding))
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            pass
 
     def _run_loop(self, interval):
         while self.is_running:
@@ -3217,24 +3383,28 @@ class RoomTracker:
                 if not self.is_running:
                     break
                 if data and isinstance(data.get("members"), list):
+                    data = dict(data)
+                    if self.follower is not None:
+                        self.follower.check_new_lines()
+                        data["_round_errors"] = self.follower.get_round_errors()
                     self.latest_data = data
                     self.last_error = None
                     self.last_success_at = time.monotonic()
                     host_id = data.get("host")
                     members = data.get("members", [])
                     
-                    sig = f"{host_id}:" + ",".join(f"{m.get('player_id')}:{m.get('ready')}:{m.get('state')}:{m.get('problem')}" for m in members)
+                    sig = (f"{host_id}:" + ",".join(f"{m.get('player_id')}:{m.get('ready')}:{m.get('state')}:{member_problem(m)}" for m in members)
+                           + ":" + json.dumps(data.get("_round_errors", []), sort_keys=True, ensure_ascii=False))
                     sig_changed = (sig != self.last_sig)
                     if sig_changed:
                         self.last_sig = sig
                         if not self.table_printed:
-                            print("\n" + format_member_table(self.room_code, host_id, members, self.expected_players))
+                            self._write_console("\n" + format_member_table(self.room_code, host_id, members, self.expected_players) + "\n")
                             self.table_printed = True
                         else:
-                            ready_cnt = sum(1 for idx, m in enumerate(members) if m.get("ready") or (str(m.get("player_id")) == str(host_id) or (idx == 0 and not host_id)))
-                            m_sum = " | ".join(f"{m.get('name') or m.get('player_id')}:{'✓' if (m.get('ready') or str(m.get('player_id'))==str(host_id) or idx==0) else '..'}" for idx, m in enumerate(members[:4]))
-                            sys.stdout.write(f"\r>> [REAL-TIME PHONG {self.room_code}] ({ready_cnt}/{self.expected_players} SAN SANG) [{m_sum}]  ")
-                            sys.stdout.flush()
+                            ready_cnt = sum(1 for idx, m in enumerate(members) if not member_problem(m) and (m.get("ready") or (str(m.get("player_id")) == str(host_id) or (idx == 0 and not host_id))))
+                            m_sum = " | ".join(f"{m.get('name') or m.get('player_id')}:{'!' if member_problem(m) else '✓' if (m.get('ready') or str(m.get('player_id'))==str(host_id) or idx==0) else '..'}" for idx, m in enumerate(members[:4]))
+                            self._write_console(f"\r>> [REAL-TIME PHONG {self.room_code}] ({ready_cnt}/{self.expected_players} SAN SANG) [{m_sum}]  ")
 
                         if self.on_change_callback:
                             try:
@@ -3247,8 +3417,11 @@ class RoomTracker:
                         if sig_changed or getattr(self, "_force_hud_update", False):
                             self._force_hud_update = False
                             hud_text = format_hud_roster(self.room_code, host_id, members, self.expected_players)
+                            errors = room_member_errors(data)
+                            if errors:
+                                hud_text = "ODX BÁO LỖI: " + "; ".join(format_room_error(item) for item in errors) + " | " + hud_text
                             all_ready = self.is_all_ready(self.expected_players)
-                            fg = "#A7F3D0" if all_ready else "#FCD34D"
+                            fg = "#EF4444" if errors else "#A7F3D0" if all_ready else "#FCD34D"
                             self.overlay.show_roster_hud(hud_text, fg, roster=True)
                 else:
                     message = (data.get("message") or data.get("error")) if isinstance(data, dict) else None

@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import random
 import re
 import tempfile
 import sys
@@ -84,9 +85,15 @@ class GuiTests(unittest.TestCase):
             send_toggle_hotkey=Mock(return_value=True),
             stop_recording_verified=Mock(return_value=True), cleanup_all_odx=Mock(),
             host_auto_create_room=Mock(return_value=self.room_worker), register_managed_process=Mock(side_effect=lambda process: process))
+        self.games = types.SimpleNamespace(
+            game_process_running=Mock(side_effect=lambda game: self.backend.is_game_running(
+                "arma3_x64" if game == "arma3" else "ArmaReforgerSteam")),
+            prepare_game_capture_launch=Mock(return_value=(True, "")),
+            prepare_audio_capture_launch=Mock(return_value=(True, "")),
+            set_game_capture=Mock(return_value=injection), ensure_capture_audio=Mock(return_value=injection))
         self.messages = types.SimpleNamespace(showwarning=Mock(), showerror=Mock(),
                                               showinfo=Mock(), askyesno=Mock(return_value=True))
-        self.ns = dict(be=self.backend, re=re, time=time, os=os, json=json,
+        self.ns = dict(be=self.backend, games=self.games, random=random, re=re, time=time, os=os, json=json,
                        format_elapsed=format_elapsed, format_recording_clock=format_recording_clock,
                        tempfile=tempfile, threading=types.SimpleNamespace(Thread=DeferredThread,
                                                                           get_ident=threading.get_ident,
@@ -147,6 +154,7 @@ class GuiTests(unittest.TestCase):
         self.gui.var_autoincrement = Widget(True)
         self.gui.root = types.SimpleNamespace(focus_get=lambda: None, after=Mock(), destroy=Mock())
         self.gui.overlay = types.SimpleNamespace(show_roster_hud=Mock(), clear=Mock(),
+                                                 show_action_change=Mock(return_value=True),
                                                  update_recording=Mock(), show_pending_recording=Mock(),
                                                  set_preferences=Mock(), close=Mock())
         self.gui.follower = types.SimpleNamespace(current_recording=None, current_stopped=None,
@@ -1864,6 +1872,7 @@ class GuiTests(unittest.TestCase):
         self.gui.current_mode = "PLAYER"
         self.gui._player_round_token = 1
         self.gui._player_validation_token = (0, "asm-s221-01", 1)
+        self.gui.follower.last_round_result = ("asm-s221-01", "cancelled")
         self.gui.auto_ready_player_next_round = Mock()
         self.gui.post_player_round(0, "asm-s221-01", 1, cancelled=True)
         self.assertFalse(self.gui._player_validation_failed)

@@ -24,6 +24,7 @@ class PlayerAuditWaitTests(unittest.TestCase):
         self.gui._player_failed_audit = None
         self.gui._player_ready_after_round = None
         self.gui.is_validating = True
+        self.gui.follower.last_round_result = ("round-02", "all ok")
         self.gui.auto_ready_player_next_round = Mock()
         result = types.SimpleNamespace(
             passed=passed, target="actual-capture/round-02", error=error,

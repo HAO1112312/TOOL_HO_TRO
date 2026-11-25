@@ -28,7 +28,7 @@ PRESERVED_NAMES = {"autopilot_config.json", "autopilot_progress.json", "autopilo
 PRESERVED_DIRS = {"data", "captures", "delivery", "logs", "_backups", "_update_temp",
                   ".git", ".codex", ".agents", "__pycache__"}
 REQUIRED_FILES = {"odx_gui.py", "odx_backend.py", "odx_overlay.py", "odx_updater.py",
-                  "odx_runtime.py", "odx_validation.py", "odx_instance.py", "odx_logger.py", "odx_uia.py", "odx_sync.py", "odx_window.py", "odx_hotkeys.py", "odx_timing.py",
+                  "odx_runtime.py", "odx_validation.py", "odx_instance.py", "odx_logger.py", "odx_uia.py", "odx_sync.py", "odx_window.py", "odx_hotkeys.py", "odx_timing.py", "odx_games.py",
                   "odx_check_pass.py", "odx_diagnostics.py", "odx_launch.ps1",
                   "CHAY_TOOL_AUTO_PILOT.bat", "version.json"}
 
@@ -40,7 +40,7 @@ def get_current_version_info():
             return value
     except (OSError, ValueError):
         pass
-    return {"version": "3.2.14", "version_code": 334, "update_url": "", "download_url": ""}
+    return {"version": "3.2.15", "version_code": 335, "update_url": "", "download_url": ""}
 
 
 def get_update_url():

@@ -45,6 +45,7 @@ class PostRoundReadyTests(unittest.TestCase):
     def completed_round(self, *, ok=True, cancelled=False, task="round-01"):
         self.gui.is_validating = True
         self.gui._player_validation_token = (0, task, 1)
+        self.gui.follower.last_round_result = (task, "cancelled" if cancelled else "all ok")
         self.gui.finish_player_validation(0, task, 1, ok, cancelled)
 
     def run_pending_workers(self):

@@ -28,7 +28,8 @@ _ROOM = re.compile(r"[A-Z0-9]{6}\Z")
 _PHASES = frozenset(("idle", "preparing", "countdown", "recording", "stopping",
                      "validating", "choices", "cooldown", "complete", "error"))
 _BOOL_KEYS = frozenset(("auto_increment", "random_enabled", "test_mode", "hud_enabled",
-                       "hud_show_timer", "hud_show_task", "hud_show_roster"))
+                       "hud_show_timer", "hud_show_task", "hud_show_roster",
+                       "action_prompt_enabled", "record_audio"))
 _INTEGER_RANGES = {
     "start_num": (1, 1000000), "total_tasks": (1, 1000000),
     "round_duration_seconds": (1, 3600), "random_offset_seconds": (0, 60),
@@ -57,6 +58,8 @@ def validate_settings(settings):
         valid = False
         if key in _BOOL_KEYS:
             valid = type(value) is bool
+        elif key == "action_prompt_at_seconds":
+            valid = value is None or (type(value) is int and 125 <= value <= 130)
         elif key in _INTEGER_RANGES:
             low, high = _INTEGER_RANGES[key]
             valid = type(value) is int and low <= value <= high
@@ -75,6 +78,8 @@ def validate_settings(settings):
             valid = value == "task-md5-v1"
         elif key == "hud_language":
             valid = value in ("vi", "en")
+        elif key == "game_selection":
+            valid = value in ("arma3", "arma-reforger")
         elif key == "app_version":
             valid = isinstance(value, str) and bool(re.fullmatch(r"\d{1,4}(?:\.\d{1,4}){1,3}", value))
         elif key == "start_request_id":
