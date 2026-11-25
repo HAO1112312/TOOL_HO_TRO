@@ -1,5 +1,5 @@
 ========================================================================
-     HƯỚNG DẪN SỬ DỤNG BỘ TOOL TỰ ĐỘNG HÓA ODX CAPTURE (v3.2.15)
+     HƯỚNG DẪN SỬ DỤNG BỘ TOOL TỰ ĐỘNG HÓA ODX CAPTURE (v3.2.16)
              GIAO DIỆN HIỆN ĐẠI (STUDIO UX/UI) & BACKEND ĐỒNG BỘ
 ========================================================================
 
@@ -8,6 +8,8 @@
   cửa sổ game đang chạy, chọn đúng hồ sơ game và bật Ghi âm thanh trên mỗi máy.
   Player nhận game từ Host rồi tự tìm nguồn trên máy mình; không chép handle
   cửa sổ hoặc đường dẫn của Host. Không chọn dòng game “không chạy”.
+- Lời nhắc chỉ hiện chữ vàng có viền đen mảnh, nền hoàn toàn trong suốt;
+  không có khung hoặc tên task che game.
 - Mỗi round có một lần nhắc “THAY ĐỔI HÀNH ĐỘNG” lớn giữa màn hình trong 5 giây.
   Host random một mốc 02:05–02:10, gửi cùng mốc cho Player trước khi bắt đầu.
   Mốc tính từ lúc recorder ghi thật, không gồm countdown. Round ngắn hơn
@@ -29,7 +31,7 @@
 - F10 dùng nhận diện native đã chuẩn bị, xác minh lại trực tiếp cửa sổ và
   nút Kết thúc đúng Host/room/task trước khi gọi. Không chờ API trên đường
   phát lệnh; xác nhận kết thúc/lưu/kiểm định vẫn theo Odx và server.
-- Sau cập nhật phải mở lại tool và kiểm tra tiêu đề v3.2.15. Thay file trên
+- Sau cập nhật phải mở lại tool và kiểm tra tiêu đề v3.2.16. Thay file trên
   đĩa không thay phiên Python đang chạy; bản đang mở vẫn dùng mã lúc khởi động.
 - HUD và đồng hồ Host/Player dùng chung cách hiển thị phần mười giây.
   Player dùng cùng mẫu thời gian cho HUD và giao diện, kể cả khi VM cập nhật chậm.
@@ -136,7 +138,7 @@
 ------------------------------------------------------------------------
 ⭐ ĐỒNG BỘ CẤU HÌNH HOST–PLAYER
 ------------------------------------------------------------------------
-- Cập nhật cùng bản 3.2.15 trên Host và mọi Player; giữ đủ các file đi kèm bộ tool.
+- Cập nhật cùng bản 3.2.16 trên Host và mọi Player; giữ đủ các file đi kèm bộ tool.
 - Host là nguồn chung cho mã task, thời lượng đã random, quy tắc random, số máy,
   thời gian nghỉ, tiến trình round, game, ghi âm và các lựa chọn hiển thị HUD.
   Mốc nhắc đổi hành động được chọn một lần cho mỗi yêu cầu bắt đầu, không random

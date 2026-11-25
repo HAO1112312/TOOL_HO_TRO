@@ -1,0 +1,10 @@
+ODX CAPTURE AUTO-PILOT v3.2.16 — 2026-11-25
+
+- Lời nhắc giữa màn hình chỉ còn chữ “THAY ĐỔI HÀNH ĐỘNG”, không có khung nền
+  hoặc dòng tên task. Nền cửa sổ trong suốt hoàn toàn để nhìn thấy game phía sau.
+- Chữ vàng lớn, viền đen mảnh để dễ đọc trên vùng sáng/tối. Chuột bấm xuyên qua,
+  không giành focus. Giữ mốc random 02:05–02:10, thời gian hiện 5 giây và đồng bộ
+  Host–Player; các điều kiện Ready, kiểm định và chọn nguồn game giữ nguyên.
+
+Cập nhật cùng v3.2.16 trên Host và mọi Player rồi mở lại tool. Gói cập nhật chỉ
+chứa mã tool/tài liệu/kiểm thử, không kèm Odx hoặc dữ liệu/config/capture riêng.

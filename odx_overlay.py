@@ -27,6 +27,8 @@ WS_EX_TRANSPARENT = 0x00000020
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
+ACTION_TRANSPARENT_COLOR = "#010203"
+ACTION_PROMPT_TEXT = "THAY ĐỔI HÀNH ĐỘNG"
 
 DEFAULT_PREFERENCES = {
     "hud_enabled": True, "hud_show_timer": True, "hud_show_task": True,
@@ -157,19 +159,23 @@ class OdxOverlay:
         self._apply_stealth(self.banner_win)
         self.banner_win.withdraw()
 
-        # A separate, small center window keeps the recording HUD visible.
+        # Only outlined text is visible; the color-keyed area shows gameplay.
         self.action_win = tk.Toplevel(self.root)
         self.action_win.withdraw()
         self.action_win.overrideredirect(True)
         self.action_win.attributes("-topmost", True)
-        self.action_win.config(bg="#78350f")
-        self.action_l1 = tk.Label(self.action_win, text="THAY ĐỔI HÀNH ĐỘNG",
-                                  font=("Arial", 36, "bold"), fg="#fef3c7", bg="#78350f",
-                                  justify="center", anchor="center")
-        self.action_l1.pack(expand=True, fill="both", padx=20, pady=(14, 2))
-        self.action_l2 = tk.Label(self.action_win, text="", font=("Arial", 14, "bold"),
-                                  fg="#ffffff", bg="#78350f", justify="center")
-        self.action_l2.pack(fill="x", padx=20, pady=(0, 14))
+        self.action_win.config(bg=ACTION_TRANSPARENT_COLOR, borderwidth=0)
+        self.action_win.attributes("-transparentcolor", ACTION_TRANSPARENT_COLOR)
+        self.action_canvas = tk.Canvas(self.action_win, bg=ACTION_TRANSPARENT_COLOR,
+                                       borderwidth=0, highlightthickness=0)
+        self.action_canvas.pack(expand=True, fill="both")
+        for index in range(8):
+            self.action_canvas.create_text(0, 0, text=ACTION_PROMPT_TEXT, fill="#000000",
+                                           anchor="center", justify="center",
+                                           tags=("action_label", f"action_outline_{index}"))
+        self.action_canvas.create_text(0, 0, text=ACTION_PROMPT_TEXT, fill="#FFE066",
+                                       anchor="center", justify="center",
+                                       tags=("action_label", "action_main"))
         self._action_hide_after = None
         self._apply_stealth(self.action_win)
         self.action_win.withdraw()
@@ -381,9 +387,15 @@ class OdxOverlay:
         width, height, x, y = self._fit_action_bounds(self._action_work_area(screen_w, screen_h), scale)
         self.action_win.geometry(f"{width}x{height}{x:+d}{y:+d}")
         title_size = max(18, min(round(36 * scale), max(18, width // 20)))
-        self.action_l1.config(font=("Arial", title_size, "bold"), wraplength=max(1, width - 40))
-        self.action_l2.config(font=("Arial", max(10, min(round(14 * scale), title_size // 2)), "bold"),
-                              wraplength=max(1, width - 40))
+        self.action_canvas.config(width=width, height=height)
+        self.action_canvas.itemconfigure("action_label", text=ACTION_PROMPT_TEXT,
+                                         font=("Arial", title_size, "bold"), width=max(1, width - 40))
+        outline = max(1, round(2 * scale))
+        for index, (dx, dy) in enumerate(((-1, -1), (0, -1), (1, -1), (-1, 0),
+                                         (1, 0), (-1, 1), (0, 1), (1, 1))):
+            self.action_canvas.coords(f"action_outline_{index}", width / 2 + dx * outline,
+                                       height / 2 + dy * outline)
+        self.action_canvas.coords("action_main", width / 2, height / 2)
 
     def _hide_action_ui(self, generation=None):
         """Run only on the Tk thread; a stale timer cannot hide a later cue."""
@@ -413,11 +425,6 @@ class OdxOverlay:
                 return False
         self._hide_action_ui(generation)
         self._position_action_window(preferences, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
-        detail = f"Task: {task_id}" if preferences["hud_show_task"] else "Tiếp tục quay"
-        if preferences.get("test_mode", False):
-            detail = "[TEST] " + detail
-        self.action_l1.config(text="THAY ĐỔI HÀNH ĐỘNG")
-        self.action_l2.config(text=detail)
         with self._action_state():
             if generation != self._action_generation or self._overlay_closed:
                 return False

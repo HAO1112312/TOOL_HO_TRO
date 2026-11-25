@@ -36,8 +36,7 @@ class ActionOverlayTests(unittest.TestCase):
         self.overlay._preferences = dict(DEFAULT_PREFERENCES)
         self.overlay.root = FakeRoot()
         self.overlay.action_win = Mock()
-        self.overlay.action_l1 = Mock()
-        self.overlay.action_l2 = Mock()
+        self.overlay.action_canvas = Mock()
         self.overlay._action_work_area = Mock(return_value=(0, 0, 1024, 728))
         self.overlay.hud_win = Mock()
 
@@ -58,12 +57,12 @@ class ActionOverlayTests(unittest.TestCase):
         self.overlay.root = Mock(side_effect=AssertionError("No caller-side Tk"))
         self.assertTrue(self.overlay.show_action_change("round-01", cue_id="start-1"))
         self.overlay.action_win.deiconify.assert_not_called()
-        self.overlay.action_l1.config.assert_not_called()
+        self.overlay.action_canvas.itemconfigure.assert_not_called()
         self.assertEqual(self.commands()[0][:1], ("SHOW_ACTION",))
 
     def test_center_prompt_uses_exact_message_and_keeps_recording_hud(self):
         self.show()
-        self.overlay.action_l1.config.assert_any_call(text="THAY ĐỔI HÀNH ĐỘNG")
+        self.assertEqual(self.overlay.action_canvas.itemconfigure.call_args.kwargs["text"], "THAY ĐỔI HÀNH ĐỘNG")
         self.overlay.action_win.state.assert_called_once_with("normal")
         self.overlay.action_win.deiconify.assert_not_called()
         self.overlay.hud_win.withdraw.assert_not_called()
@@ -174,13 +173,12 @@ class ActionOverlayTests(unittest.TestCase):
                     self.assertEqual(x, left + ((right - left) - width) // 2)
                     self.assertEqual(y, top + ((bottom - top) - height) // 2)
 
-    def test_task_privacy_and_test_label_apply_without_altering_message(self):
+    def test_only_fixed_message_is_drawn_without_task_or_test_subtitle(self):
         self.overlay._preferences.update(hud_show_task=False, test_mode=True)
         self.show("private-task-01", "nonce")
-        self.overlay.action_l1.config.assert_any_call(text="THAY ĐỔI HÀNH ĐỘNG")
-        detail = self.overlay.action_l2.config.call_args.kwargs["text"]
-        self.assertTrue(detail.startswith("[TEST]"))
-        self.assertNotIn("private-task", detail)
+        texts = [call.kwargs["text"] for call in self.overlay.action_canvas.itemconfigure.call_args_list
+                 if "text" in call.kwargs]
+        self.assertEqual(texts, ["THAY ĐỔI HÀNH ĐỘNG"])
 
     def test_invalid_or_unbounded_requests_never_reach_ui(self):
         for duration in (0, -1, True, "5", float("nan"), float("inf")):
